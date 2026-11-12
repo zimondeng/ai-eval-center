@@ -742,6 +742,14 @@ async def execute_eval_run(
                                         )
                                     )
                                 )
+                            if ev_res.min_confidence is not None:
+                                case_row = step_db.get(EvalCase, outcome.case_id)
+                                if case_row is not None and case_row.is_deleted == 0:
+                                    case_row.uncertainty_score = round(
+                                        max(0.0, min(1.0, 1.0 - float(ev_res.min_confidence))),
+                                        4,
+                                    )
+                                    case_row.update_time = utcnow_naive()
 
                         cur_run.completed_cases = int(cur_run.completed_cases or 0) + 1
                         if outcome.exec_status == "SUCCESS" and ev_res is not None:

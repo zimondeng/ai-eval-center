@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import {
   ArrowLeft,
   Check,
@@ -10,7 +10,7 @@ import {
   Refresh,
 } from '@element-plus/icons-vue'
 import { adaptersApi, dimensionsApi, providersApi, suitesApi } from '@/api/endpoints'
-import { formatReadableError, formatScore } from '@/api/http'
+import { formatReadableError, formatScore, validateRequiredJsonObject } from '@/api/http'
 import type {
   AtomicQuestionSpec,
   DecisionProviderRecord,
@@ -85,6 +85,7 @@ const editingExistingVersion = ref<number | null>(null)
 const savingDimension = ref(false)
 const linting = ref(false)
 const lintReport = ref<LintReport>({ passed: true, issues: [] })
+const dimFormRef = ref<FormInstance>()
 
 const dimForm = reactive({
   dimension_code: '',
@@ -107,6 +108,67 @@ const dimForm = reactive({
     2,
   ),
 })
+
+const dimRules: FormRules = {
+  dimension_code: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) => {
+        const trimmed = (val ?? '').trim()
+        if (!trimmed) {
+          cb(new Error('请填写维度编码'))
+          return
+        }
+        if (!/^[A-Za-z0-9_]+$/.test(trimmed) || trimmed.includes('__')) {
+          cb(new Error('仅允许字母、数字与单下划线，不可包含双下划线 __'))
+          return
+        }
+        cb()
+      },
+      trigger: 'blur',
+    },
+  ],
+  dimension_name: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写维度名称')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  default_threshold: [
+    {
+      required: true,
+      type: 'number',
+      min: 0,
+      max: 1,
+      message: '默认达标阈值须在 0 到 1 之间',
+      trigger: 'change',
+    },
+  ],
+  default_weight: [
+    {
+      required: true,
+      type: 'number',
+      min: 0.1,
+      max: 10,
+      message: '默认合成权重须在 0.1 到 10 之间',
+      trigger: 'change',
+    },
+  ],
+  deterministic_rule_text: [
+    {
+      validator: (rule, val: string, cb) => {
+        if (dimForm.evaluator_kind !== 'DETERMINISTIC') {
+          cb()
+          return
+        }
+        validateRequiredJsonObject(rule, val, cb)
+      },
+      trigger: 'blur',
+    },
+  ],
+}
 
 const editableQuestions = ref<EditableQuestionItem[]>([])
 
@@ -294,6 +356,7 @@ function openCreateDimension(): void {
   dimForm.description = ''
   editableQuestions.value = [createDefaultQuestion(1)]
   editorOpen.value = true
+  dimFormRef.value?.clearValidate()
   void runLiveLint()
 }
 
@@ -348,6 +411,7 @@ function openUpgradeDimension(row: DimensionRecord): void {
   }
 
   editorOpen.value = true
+  dimFormRef.value?.clearValidate()
   void runLiveLint()
 }
 
@@ -367,20 +431,15 @@ function focusQuestionCard(qKey?: string | null): void {
 }
 
 async function handleSubmitDimension(status: 'DRAFT' | 'ACTIVE'): Promise<void> {
-  if (!dimForm.dimension_code.trim() || !dimForm.dimension_name.trim()) {
-    ElMessage.warning('请填写维度编码与维度名称')
-    return
+  if (dimFormRef.value) {
+    const ok = await dimFormRef.value.validate().catch(() => false)
+    if (!ok) return
   }
 
-  let detRule: Record<string, unknown> | null = null
-  if (dimForm.evaluator_kind === 'DETERMINISTIC') {
-    try {
-      detRule = JSON.parse(dimForm.deterministic_rule_text) as Record<string, unknown>
-    } catch {
-      ElMessage.error('确定性规则 JSON 格式不合法')
-      return
-    }
-  }
+  const detRule =
+    dimForm.evaluator_kind === 'DETERMINISTIC'
+      ? (JSON.parse(dimForm.deterministic_rule_text) as Record<string, unknown>)
+      : null
 
   const payload: DimensionCreatePayload = {
     dimension_code: dimForm.dimension_code.trim(),
@@ -418,6 +477,7 @@ async function handleSubmitDimension(status: 'DRAFT' | 'ACTIVE'): Promise<void> 
 const suiteDrawerOpen = ref(false)
 const isEditingSuite = ref(false)
 const savingSuite = ref(false)
+const suiteFormRef = ref<FormInstance>()
 
 const suiteForm = reactive<{
   suite_code: string
@@ -449,6 +509,54 @@ const suiteForm = reactive<{
   bindings: [],
 })
 
+const suiteRules: FormRules = {
+  suite_code: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写套件编码')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  suite_name: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写套件名称')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  suite_pass_threshold: [
+    {
+      required: true,
+      type: 'number',
+      min: 0,
+      max: 1,
+      message: '套件加权及格线须在 0 到 1 之间',
+      trigger: 'change',
+    },
+  ],
+  confidence_review_floor: [
+    {
+      required: true,
+      type: 'number',
+      min: 0,
+      max: 1,
+      message: '把握度复核下限须在 0 到 1 之间',
+      trigger: 'change',
+    },
+  ],
+  bindings: [
+    {
+      validator: (_rule, _val, cb) =>
+        suiteForm.bindings.length === 0
+          ? cb(new Error('请至少绑定一个锁定版本的评价维度'))
+          : cb(),
+      trigger: 'change',
+    },
+  ],
+}
+
 function openCreateSuite(): void {
   isEditingSuite.value = false
   suiteForm.suite_code = ''
@@ -476,6 +584,7 @@ function openCreateSuite(): void {
       ]
     : []
   suiteDrawerOpen.value = true
+  suiteFormRef.value?.clearValidate()
 }
 
 function openEditSuite(row: SuiteRecord): void {
@@ -494,6 +603,7 @@ function openEditSuite(row: SuiteRecord): void {
   suiteForm.description = row.description || ''
   suiteForm.bindings = row.dimensions_json.map((b) => ({ ...b }))
   suiteDrawerOpen.value = true
+  suiteFormRef.value?.clearValidate()
 }
 
 function addSuiteBinding(): void {
@@ -511,16 +621,13 @@ function addSuiteBinding(): void {
     threshold: candidate.default_threshold,
     is_blocker: false,
   })
+  suiteFormRef.value?.clearValidate('bindings')
 }
 
 async function handleSaveSuite(): Promise<void> {
-  if (!suiteForm.suite_code.trim() || !suiteForm.suite_name.trim()) {
-    ElMessage.warning('请填写套件编码与名称')
-    return
-  }
-  if (suiteForm.bindings.length === 0) {
-    ElMessage.warning('请至少绑定一个锁定版本的评价维度')
-    return
+  if (suiteFormRef.value) {
+    const ok = await suiteFormRef.value.validate().catch(() => false)
+    if (!ok) return
   }
 
   const payload: SuiteUpsertPayload = {
@@ -634,16 +741,16 @@ onBeforeUnmount(() => {
       <div class="ev-workbench-columns">
         <!-- Left 60% Form -->
         <section class="ev-workbench-left ev-surface">
-          <el-form label-position="top">
+          <el-form ref="dimFormRef" :model="dimForm" :rules="dimRules" label-position="top">
             <div class="ev-grid-2">
-              <el-form-item label="维度编码 (dimension_code)" required>
+              <el-form-item label="维度编码 (dimension_code)" prop="dimension_code">
                 <el-input
                   v-model="dimForm.dimension_code"
                   :disabled="editingExistingVersion !== null"
                   placeholder="如 rag_faithfulness_s1（不可含双下划线）"
                 />
               </el-form-item>
-              <el-form-item label="维度名称" required>
+              <el-form-item label="维度名称" prop="dimension_name">
                 <el-input v-model="dimForm.dimension_name" placeholder="如 知识引用忠实度与零编造" />
               </el-form-item>
             </div>
@@ -675,7 +782,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="ev-grid-3">
-              <el-form-item label="默认达标阈值 [0, 1]">
+              <el-form-item label="默认达标阈值 [0, 1]" prop="default_threshold">
                 <el-input-number
                   v-model="dimForm.default_threshold"
                   :min="0"
@@ -684,7 +791,7 @@ onBeforeUnmount(() => {
                   :precision="2"
                 />
               </el-form-item>
-              <el-form-item label="默认合成权重">
+              <el-form-item label="默认合成权重" prop="default_weight">
                 <el-input-number
                   v-model="dimForm.default_weight"
                   :min="0.1"
@@ -843,7 +950,10 @@ onBeforeUnmount(() => {
 
             <!-- DETERMINISTIC Rule Editor -->
             <template v-else>
-              <el-form-item label="确定性规则配置 JSON (deterministic_rule_json)">
+              <el-form-item
+                label="确定性规则配置 JSON (deterministic_rule_json)"
+                prop="deterministic_rule_text"
+              >
                 <el-input
                   v-model="dimForm.deterministic_rule_text"
                   type="textarea"
@@ -1186,16 +1296,16 @@ onBeforeUnmount(() => {
       :title="isEditingSuite ? '编辑评测套件门禁' : '新增评测套件门禁'"
       size="720px"
     >
-      <el-form label-position="top">
+      <el-form ref="suiteFormRef" :model="suiteForm" :rules="suiteRules" label-position="top">
         <div class="ev-grid-2">
-          <el-form-item label="套件编码 (suite_code)" required>
+          <el-form-item label="套件编码 (suite_code)" prop="suite_code">
             <el-input
               v-model="suiteForm.suite_code"
               :disabled="isEditingSuite"
               placeholder="如 suite_gov_e2e_golden_v1"
             />
           </el-form-item>
-          <el-form-item label="套件名称" required>
+          <el-form-item label="套件名称" prop="suite_name">
             <el-input v-model="suiteForm.suite_name" placeholder="如 政务客服端到端黄金验收套件" />
           </el-form-item>
         </div>
@@ -1213,7 +1323,7 @@ onBeforeUnmount(() => {
               <el-option label="全部维度同时达标" value="ALL_DIMENSIONS" />
             </el-select>
           </el-form-item>
-          <el-form-item label="套件加权及格线">
+          <el-form-item label="套件加权及格线" prop="suite_pass_threshold">
             <el-input-number
               v-model="suiteForm.suite_pass_threshold"
               :min="0"
@@ -1225,7 +1335,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="ev-grid-3">
-          <el-form-item label="把握度复核下限 (confidence_review_floor)">
+          <el-form-item label="把握度复核下限 (confidence_review_floor)" prop="confidence_review_floor">
             <el-input-number
               v-model="suiteForm.confidence_review_floor"
               :min="0"
@@ -1265,43 +1375,47 @@ onBeforeUnmount(() => {
           <el-button size="small" :icon="Plus" @click="addSuiteBinding">添加维度绑定</el-button>
         </div>
 
-        <div
-          v-for="(b, bIdx) in suiteForm.bindings"
-          :key="bIdx"
-          class="ev-binding-row ev-panel"
-        >
-          <el-select v-model="b.dimension_code" style="width: 220px">
-            <el-option
-              v-for="d in latestDimensionsByCode.filter((x) => x.status === 'ACTIVE')"
-              :key="d.dimension_code"
-              :label="`${d.dimension_code} (${d.dimension_name})`"
-              :value="d.dimension_code"
-            />
-          </el-select>
-          <el-select v-model="b.version" style="width: 100px">
-            <el-option
-              v-for="verRow in activeDimensionsForSuite.filter(
-                (x) => x.dimension_code === b.dimension_code,
-              )"
-              :key="verRow.version"
-              :label="`v${verRow.version}`"
-              :value="verRow.version"
-            />
-          </el-select>
-          <span class="ev-cell-secondary">阈值</span>
-          <el-input-number v-model="b.threshold" :min="0" :max="1" :step="0.05" :precision="2" size="small" />
-          <span class="ev-cell-secondary">权重</span>
-          <el-input-number v-model="b.weight" :min="0.1" :max="10" :step="0.5" :precision="1" size="small" />
-          <el-checkbox v-model="b.is_blocker">一票否决</el-checkbox>
-          <el-button
-            v-if="suiteForm.bindings.length > 1"
-            size="small"
-            link
-            @click="suiteForm.bindings.splice(bIdx, 1)"
-          >
-            移除
-          </el-button>
-        </div>
+        <el-form-item prop="bindings">
+          <div class="ev-bindings-list">
+            <div
+              v-for="(b, bIdx) in suiteForm.bindings"
+              :key="bIdx"
+              class="ev-binding-row ev-panel"
+            >
+              <el-select v-model="b.dimension_code" style="width: 220px">
+                <el-option
+                  v-for="d in latestDimensionsByCode.filter((x) => x.status === 'ACTIVE')"
+                  :key="d.dimension_code"
+                  :label="`${d.dimension_code} (${d.dimension_name})`"
+                  :value="d.dimension_code"
+                />
+              </el-select>
+              <el-select v-model="b.version" style="width: 100px">
+                <el-option
+                  v-for="verRow in activeDimensionsForSuite.filter(
+                    (x) => x.dimension_code === b.dimension_code,
+                  )"
+                  :key="verRow.version"
+                  :label="`v${verRow.version}`"
+                  :value="verRow.version"
+                />
+              </el-select>
+              <span class="ev-cell-secondary">阈值</span>
+              <el-input-number v-model="b.threshold" :min="0" :max="1" :step="0.05" :precision="2" size="small" />
+              <span class="ev-cell-secondary">权重</span>
+              <el-input-number v-model="b.weight" :min="0.1" :max="10" :step="0.5" :precision="1" size="small" />
+              <el-checkbox v-model="b.is_blocker">一票否决</el-checkbox>
+              <el-button
+                v-if="suiteForm.bindings.length > 1"
+                size="small"
+                link
+                @click="suiteForm.bindings.splice(bIdx, 1)"
+              >
+                移除
+              </el-button>
+            </div>
+          </div>
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -1535,6 +1649,10 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.ev-bindings-list {
+  width: 100%;
 }
 
 .ev-binding-row {

@@ -9,13 +9,23 @@ from fastapi import FastAPI
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from app.common.auth_deps import create_access_token
+from app.common.auth_deps import create_access_token, reset_api_key_rate_limiter
+from app.common.http_client import reset_http_client_pools
 from app.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models import AdminUser
 from app.db.seed import seed_defaults
 from app.db.session import build_engine, build_session_factory, get_db
 from app.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_in_memory_singletons() -> Generator[None, None, None]:
+    reset_api_key_rate_limiter()
+    reset_http_client_pools()
+    yield
+    reset_api_key_rate_limiter()
+    reset_http_client_pools()
 
 
 @pytest.fixture

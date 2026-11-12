@@ -168,6 +168,57 @@ async def test_api_keys_create_list_revoke_and_hybrid_auth_rejection(
     assert missing_rev.status_code == 404
 
 
+async def test_api_key_rate_limit_rpm_enforces_429_sliding_window(
+    client: httpx.AsyncClient,
+    app,
+    admin_headers: dict[str, str],
+) -> None:
+    from fastapi import APIRouter, Depends
+
+    from app.common.auth_deps import (
+        CurrentPrincipal,
+        require_console_or_api_key,
+        reset_api_key_rate_limiter,
+    )
+    from app.common.envelope import ok_response
+
+    reset_api_key_rate_limiter()
+
+    rpm_router = APIRouter()
+
+    @rpm_router.get("/runs-rpm-probe")
+    def _rpm_probe(
+        principal: CurrentPrincipal = Depends(require_console_or_api_key),
+    ) -> dict:
+        return ok_response({"id": principal.principal_id})
+
+    app.include_router(rpm_router, prefix="/api/v1")
+
+    create_resp = await client.post(
+        "/api/v1/api-keys",
+        headers=admin_headers,
+        json={"key_name": "ci-rpm-2", "rate_limit_rpm": 2},
+    )
+    assert create_resp.status_code == 200
+    raw_key = create_resp.json()["data"]["api_key_plain"]
+    headers = {"X-API-Key": raw_key}
+
+    r1 = await client.get("/api/v1/runs-rpm-probe", headers=headers)
+    r2 = await client.get("/api/v1/runs-rpm-probe", headers=headers)
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+    r3 = await client.get("/api/v1/runs-rpm-probe", headers=headers)
+    assert r3.status_code == 429
+    body3 = r3.json()
+    assert body3["code"] == 429
+    assert "每分钟请求频率超限" in body3["message"]
+
+    reset_api_key_rate_limiter()
+    r4 = await client.get("/api/v1/runs-rpm-probe", headers=headers)
+    assert r4.status_code == 200
+
+
 async def test_providers_upsert_update_secret_masking_ollama_defaults_and_exclusive_default(
     client: httpx.AsyncClient,
     db_session: Session,
@@ -323,6 +374,31 @@ async def test_providers_upsert_update_secret_masking_ollama_defaults_and_exclus
         json={"status": "DISABLED"},
     )
     assert missing_put.status_code == 404
+
+    # Seeded ollama_local_tev1 has {"keep_alive": "15m"}; both PUT and POST upsert
+    # omitting extra_options_json MUST preserve existing extra_options_json.
+    put_ollama = await client.put(
+        "/api/v1/providers/ollama_local_tev1",
+        headers=admin_headers,
+        json={"provider_name": "本地 Ollama tev1 (改名)"},
+    )
+    assert put_ollama.status_code == 200
+    assert put_ollama.json()["data"]["extra_options_json"] == {"keep_alive": "15m"}
+
+    upsert_ollama = await client.post(
+        "/api/v1/providers",
+        headers=admin_headers,
+        json={
+            "provider_code": "ollama_local_tev1",
+            "provider_name": "本地 Ollama tev1 (再次保存)",
+            "provider_kind": "OLLAMA_LOCAL",
+            "endpoint_url": "http://127.0.0.1:11434/v1/systemone",
+            "models_list_url": "http://127.0.0.1:11434/v1/models",
+            "default_model": "tev1:0.8b",
+        },
+    )
+    assert upsert_ollama.status_code == 200
+    assert upsert_ollama.json()["data"]["extra_options_json"] == {"keep_alive": "15m"}
 
 
 async def test_provider_connectivity_probe_all_three_kinds_and_health_persistence(

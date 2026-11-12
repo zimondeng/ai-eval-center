@@ -149,6 +149,118 @@ async def test_http_client_direct_and_proxy_fallback_against_local_server(
         await server.wait_closed()
 
 
+async def test_http_client_pools_reuse_and_proxy_fallback_cache_invalidation() -> None:
+    import asyncio
+    from app.common.http_client import (
+        aclose_http_client_pools,
+        get_pooled_async_client,
+        request_with_policy,
+        reset_http_client_pools,
+    )
+
+    reset_http_client_pools()
+
+    async def handle_origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        body = b'{"origin":true}'
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def handle_http_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        body = b'{"via_proxy":true}'
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    origin_srv = await asyncio.start_server(handle_origin, "127.0.0.1", 0)
+    origin_port = origin_srv.sockets[0].getsockname()[1]
+    origin_url = f"http://127.0.0.1:{origin_port}/check"
+
+    proxy_srv = await asyncio.start_server(handle_http_proxy, "127.0.0.1", 0)
+    proxy_port = proxy_srv.sockets[0].getsockname()[1]
+    working_proxy = f"http://127.0.0.1:{proxy_port}"
+
+    try:
+        c1 = get_pooled_async_client(None, False)
+        c2 = get_pooled_async_client(None, False)
+        c3 = get_pooled_async_client(None, True)
+        assert c1 is c2
+        assert c1 is not c3
+
+        candidates = ["http://127.0.0.1:1", working_proxy]
+
+        # 1st call: port 1 fails -> working_proxy succeeds (attempts == 2) and gets cached
+        r1 = await request_with_policy(
+            "GET",
+            origin_url,
+            network_mode="PROXY_FALLBACK",
+            proxy_candidates=candidates,
+            timeout_seconds=0.5,
+        )
+        assert r1.used_proxy == working_proxy
+        assert r1.attempts == 2
+        assert r1.response.json() == {"via_proxy": True}
+
+        # 2nd call: hits cached working_proxy directly (attempts == 1, skips dead port 1)
+        r2 = await request_with_policy(
+            "GET",
+            origin_url,
+            network_mode="PROXY_FALLBACK",
+            proxy_candidates=candidates,
+            timeout_seconds=0.5,
+        )
+        assert r2.used_proxy == working_proxy
+        assert r2.attempts == 1
+
+        # Shut down working_proxy -> 3rd call hits TransportError on cached proxy,
+        # invalidates cache, retries remaining chain, and succeeds via DIRECT!
+        proxy_srv.close()
+        await proxy_srv.wait_closed()
+
+        r3 = await request_with_policy(
+            "GET",
+            origin_url,
+            network_mode="PROXY_FALLBACK",
+            proxy_candidates=candidates,
+            timeout_seconds=0.5,
+        )
+        assert r3.used_proxy is None
+        assert r3.channel_label == "DIRECT"
+        assert r3.response.json() == {"origin": True}
+
+        # 4th call now uses newly cached DIRECT in 1 attempt
+        r4 = await request_with_policy(
+            "GET",
+            origin_url,
+            network_mode="PROXY_FALLBACK",
+            proxy_candidates=candidates,
+            timeout_seconds=0.5,
+        )
+        assert r4.used_proxy is None
+        assert r4.attempts == 1
+
+        await aclose_http_client_pools()
+    finally:
+        origin_srv.close()
+        await origin_srv.wait_closed()
+        if proxy_srv.is_serving():
+            proxy_srv.close()
+            await proxy_srv.wait_closed()
+        reset_http_client_pools()
+
+
 async def test_http_client_mock_transport_request_and_sse_stream() -> None:
     import httpx
     from app.common.http_client import request_with_policy, stream_with_policy

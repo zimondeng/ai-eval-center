@@ -16,6 +16,7 @@ from app.common.envelope import (
     set_current_request_id,
 )
 from app.common.errors import register_exception_handlers
+from app.common.http_client import aclose_http_client_pools
 from app.config import Settings, get_settings
 from app.db.seed import init_db
 from app.db.session import get_engine
@@ -30,7 +31,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if cfg.auto_init_db:
             init_db(get_engine(cfg), seed=True, settings=cfg)
-        yield
+        try:
+            yield
+        finally:
+            await aclose_http_client_pools()
 
     application = FastAPI(
         title=cfg.app_name,

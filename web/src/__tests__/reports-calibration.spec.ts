@@ -2,8 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import ReportsView from '@/views/reports/ReportsView.vue'
-import { runsApi } from '@/api/endpoints'
-import type { CompareRunsResult, EvalRunDetail } from '@/api/types'
+import { runsApi, suitesApi } from '@/api/endpoints'
+import type { CompareRunsResult, EvalRunCaseItem, EvalRunDetail, SuiteRecord } from '@/api/types'
+
+const routerPushMock = vi.fn()
+const routerReplaceMock = vi.fn()
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({
@@ -11,8 +14,8 @@ vi.mock('vue-router', () => ({
     query: {},
   }),
   useRouter: () => ({
-    push: vi.fn(),
-    replace: vi.fn(),
+    push: routerPushMock,
+    replace: routerReplaceMock,
   }),
 }))
 
@@ -29,11 +32,16 @@ vi.mock('echarts', () => ({
 vi.mock('@/api/endpoints', () => ({
   runsApi: {
     list: vi.fn(),
+    create: vi.fn(),
     detail: vi.fn(),
     listCases: vi.fn(),
     compare: vi.fn(),
     recalculate: vi.fn(),
     recommendThresholds: vi.fn(),
+  },
+  suitesApi: {
+    detail: vi.fn(),
+    update: vi.fn(),
   },
 }))
 
@@ -88,7 +96,7 @@ function makeRunDetail(overrides: Partial<EvalRunDetail> = {}): EvalRunDetail {
     batch_saving_rate: 0.6667,
     batch_compression_ratio: 3.0,
     total_input_tokens: 128000,
-    total_eval_cost: 0.0,
+    total_eval_cost: 0.0256,
     dimension_summary_json: {
       rag_faithfulness_s1: {
         dimension_id: 3,
@@ -141,14 +149,48 @@ function makeRunDetail(overrides: Partial<EvalRunDetail> = {}): EvalRunDetail {
   }
 }
 
-describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalculation', () => {
+function makeRunCaseItem(overrides: Partial<EvalRunCaseItem> = {}): EvalRunCaseItem {
+  return {
+    id: 2001,
+    run_id: 101,
+    case_id: 501,
+    case_code: 'case_fact_diff_501',
+    dataset_split: 'HOLDOUT',
+    turn_mode: 'SINGLE_TURN',
+    difficulty: 'NORMAL',
+    input_text: '常州公积金异地转移怎么办理？',
+    conversation_turns_json: null,
+    expected_output: '可通过全国住房公积金小程序线上申请转移接续。',
+    expected_structured_json: null,
+    reference_contexts_json: null,
+    exec_status: 'SUCCESS',
+    actual_output: '必须携带纸质材料前往柜台现场办理。',
+    baseline_output: '可通过全国住房公积金小程序线上办理。',
+    actual_references_json: null,
+    actual_structured_json: null,
+    sut_trace_json: null,
+    sut_latency_ms: 410,
+    ttft_ms: 180,
+    overall_score: 0.42,
+    overall_passed: false,
+    min_confidence: 0.88,
+    needs_human_review: false,
+    regression_tag: 'FACT_DIFFERS',
+    regression_confidence: 0.94,
+    error_detail: null,
+    ledgers: [],
+    ...overrides,
+  }
+}
+
+describe('ReportsView: cross_model_warning, HOLDOUT guardrail, el-slider, suite lock & pagination', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     vi.useRealTimers()
   })
 
-  it('renders persistent cross_model_warning banner and disables threshold recommendation on HOLDOUT split', async () => {
+  it('renders loading skeleton initially, KPI cost card, dual-coded regression tags, and HOLDOUT guardrail', async () => {
     const holdoutRun = makeRunDetail({ dataset_split_filter: 'HOLDOUT' })
     const baseRun = makeRunDetail({
       id: 99,
@@ -200,22 +242,33 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
       case_diffs: [],
     }
 
+    let resolveDetail!: (val: EvalRunDetail) => void
+    const detailPromise = new Promise<EvalRunDetail>((resolve) => {
+      resolveDetail = resolve
+    })
+
     vi.mocked(runsApi.list).mockResolvedValue({
       items: [holdoutRun],
       total: 1,
       page: 1,
       page_size: 50,
     })
-    vi.mocked(runsApi.detail).mockResolvedValue(holdoutRun)
+    vi.mocked(runsApi.detail).mockReturnValueOnce(detailPromise)
     vi.mocked(runsApi.compare).mockResolvedValue(compareData)
     vi.mocked(runsApi.listCases).mockResolvedValue({
-      items: [],
-      total: 0,
+      items: [makeRunCaseItem()],
+      total: 250,
       page: 1,
       page_size: 100,
     })
 
     const wrapper = mount(ReportsView)
+    await flushPromises()
+
+    // Skeleton must show while loadingReport is active
+    expect(wrapper.find('[data-testid="report-skeleton"]').exists()).toBe(true)
+
+    resolveDetail(holdoutRun)
     await flushPromises()
 
     // 1. Verify exact cross_model_warning copy from DESIGN.md §12
@@ -225,10 +278,27 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
       '标尺变更提示：当前批次判别模型（tev1:0.8b）与基线批次（typesafe/jev-1.14.0）不一致。不同判别模型的原始概率标尺存在差异，涨跌分值仅供参考，请重点审阅「语义回归差异」明细。',
     )
 
-    // 2. Verify HOLDOUT anti-overfitting guardrail disables recommend button + surfaces exact tooltip copy
+    // 2. KPI cost card displays total_eval_cost + total_input_tokens
+    const costCard = wrapper.find('[data-testid="kpi-eval-cost"]')
+    expect(costCard.exists()).toBe(true)
+    expect(costCard.text()).toContain('估算成本')
+    expect(costCard.text()).toContain('0.0256')
+    expect(costCard.text()).toContain('128,000')
+
+    // 3. Dual-coded regression labels rendered in chart pills & case table
+    expect(wrapper.text()).toContain('✓ 实质一致 (SAME)')
+    expect(wrapper.text()).toContain('~ 详略差异 (SPECIFICITY_DIFFERS)')
+    expect(wrapper.text()).toContain('! 指引变更 (ACTION_DIFFERS)')
+    expect(wrapper.text()).toContain('✕ 事实退化 (FACT_DIFFERS)')
+
+    // 4. Verify HOLDOUT anti-overfitting guardrail disables recommend & suite lock buttons
     const recBtn = wrapper.find('[data-testid="btn-recommend-thresholds"]')
     expect(recBtn.exists()).toBe(true)
     expect(recBtn.attributes('disabled')).toBeDefined()
+
+    const lockBtn = wrapper.find('[data-testid="btn-lock-suite-thresholds"]')
+    expect(lockBtn.exists()).toBe(true)
+    expect(lockBtn.attributes('disabled')).toBeDefined()
 
     const guardReason = wrapper.find('[data-testid="holdout-guard-reason"]')
     expect(guardReason.attributes('data-guard-message')).toBe(HOLDOUT_GUARD_COPY)
@@ -236,9 +306,26 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
     await recBtn.trigger('click')
     await flushPromises()
     expect(runsApi.recommendThresholds).not.toHaveBeenCalled()
+
+    // 5. Cases table pagination renders and triggers page 2 fetch
+    const pagination = wrapper.find('[data-testid="report-cases-pagination"]')
+    expect(pagination.exists()).toBe(true)
+    const elPagination = wrapper.findComponent({ name: 'ElPagination' })
+    expect(elPagination.exists()).toBe(true)
+    elPagination.vm.$emit('update:current-page', 2)
+    elPagination.vm.$emit('current-change', 2)
+    await flushPromises()
+
+    expect(runsApi.listCases).toHaveBeenLastCalledWith(
+      'RUN_20261112_0001',
+      expect.objectContaining({
+        page: 2,
+        page_size: 100,
+      }),
+    )
   })
 
-  it('updates pass rate, flipped cases and zero-model-call elapsed badge on DEV threshold recalculation & recommendation', async () => {
+  it('uses el-slider + el-input-number on DEV split, locks calibrated thresholds to suite, and launches HOLDOUT verification run', async () => {
     vi.useFakeTimers()
     const devRun = makeRunDetail({
       dataset_split_filter: 'DEV',
@@ -246,6 +333,45 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
       baseline_run_no: null,
       baseline_pinned_model_name: null,
       cross_model_warning: false,
+    })
+
+    const suiteRecord: SuiteRecord = {
+      id: 1,
+      uuid: 'u-suite-1',
+      suite_code: 'suite_gov_e2e_v1',
+      suite_name: '政务端到端套件',
+      eval_level: 'E2E',
+      default_adapter_id: 1,
+      default_provider_id: 1,
+      default_model_override: 'tev1:0.8b',
+      dimensions_json: [
+        {
+          dimension_code: 'rag_faithfulness_s1',
+          version: 1,
+          weight: 2.0,
+          threshold: 0.75,
+          is_blocker: true,
+        },
+      ],
+      pass_policy: 'ALL_BLOCKERS_AND_WEIGHTED',
+      suite_pass_threshold: 0.75,
+      confidence_review_floor: 0.5,
+      enable_semantic_regression: true,
+      status: 'ACTIVE',
+      description: '端到端验收门禁',
+      created_by: 'admin',
+      create_time: '2026-11-12T08:00:00',
+      update_time: '2026-11-12T08:00:00',
+    }
+
+    const holdoutCreated = makeRunDetail({
+      id: 102,
+      run_no: 'RUN_20261112_0002',
+      run_name: '政务客服留出集门禁验收 · HOLDOUT 验真',
+      dataset_split_filter: 'HOLDOUT',
+      cross_model_warning: false,
+      baseline_run_id: null,
+      baseline_run_no: null,
     })
 
     vi.mocked(runsApi.list).mockResolvedValue({
@@ -302,14 +428,23 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
         compute_elapsed_ms: 5,
       },
     })
+    vi.mocked(suitesApi.detail).mockResolvedValue(suiteRecord)
+    vi.mocked(suitesApi.update).mockImplementation(async (_code, payload) => ({
+      ...suiteRecord,
+      ...payload,
+    }))
+    vi.mocked(runsApi.create).mockResolvedValue(holdoutCreated)
 
     const wrapper = mount(ReportsView)
     await flushPromises()
 
-    // Trigger threshold change via store/bench and advance 80ms throttle timer
-    const suiteInput = wrapper.find('[data-testid="suite-threshold-native-range"]')
-    expect(suiteInput.exists()).toBe(true)
-    await suiteInput.setValue('0.80')
+    // Raw <input type="range"> must be completely eliminated in favor of <el-slider>
+    expect(wrapper.find('input[type="range"]').exists()).toBe(false)
+    const sliders = wrapper.findAllComponents({ name: 'ElSlider' })
+    expect(sliders.length).toBeGreaterThanOrEqual(2)
+
+    // Trigger suite threshold change via ElSlider and advance 80ms throttle timer
+    sliders[0].vm.$emit('update:modelValue', 0.8)
     vi.advanceTimersByTime(100)
     await flushPromises()
 
@@ -327,7 +462,7 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
     const flippedBtn = wrapper.find('[data-testid="btn-filter-flipped"]')
     expect(flippedBtn.text()).toContain('3')
 
-    // Recommend optimal thresholds is enabled on DEV split
+    // Recommend optimal thresholds on DEV split
     const recBtn = wrapper.find('[data-testid="btn-recommend-thresholds"]')
     expect(recBtn.attributes('disabled')).toBeUndefined()
     await recBtn.trigger('click')
@@ -335,5 +470,43 @@ describe('ReportsView: cross_model_warning, HOLDOUT guardrail & zero-cost recalc
 
     expect(runsApi.recommendThresholds).toHaveBeenCalledWith('RUN_20261112_0001', 'youden_j')
     expect(wrapper.text()).toContain('84.2%')
+
+    // Lock calibrated thresholds back to Suite via PUT /api/v1/suites/{suite_code}
+    const lockBtn = wrapper.find('[data-testid="btn-lock-suite-thresholds"]')
+    expect(lockBtn.exists()).toBe(true)
+    expect(lockBtn.attributes('disabled')).toBeUndefined()
+    await lockBtn.trigger('click')
+    await flushPromises()
+
+    expect(suitesApi.update).toHaveBeenCalledWith(
+      'suite_gov_e2e_v1',
+      expect.objectContaining({
+        suite_code: 'suite_gov_e2e_v1',
+        suite_pass_threshold: 0.78,
+        dimensions_json: [
+          expect.objectContaining({
+            dimension_code: 'rag_faithfulness_s1',
+            version: 1,
+            threshold: 0.82,
+            weight: 2.0,
+            is_blocker: true,
+          }),
+        ],
+      }),
+    )
+
+    // Launch HOLDOUT verification batch directly from bench
+    const holdoutBtn = wrapper.find('[data-testid="btn-launch-holdout-run"]')
+    expect(holdoutBtn.exists()).toBe(true)
+    await holdoutBtn.trigger('click')
+    await flushPromises()
+
+    expect(runsApi.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        suite_code: 'suite_gov_e2e_v1',
+        dataset_id: 12,
+        dataset_split_filter: 'HOLDOUT',
+      }),
+    )
   })
 })

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Download, EditPen, Plus, Refresh, Upload, VideoCamera } from '@element-plus/icons-vue'
 import { adaptersApi, datasetsApi } from '@/api/endpoints'
 import { formatReadableError } from '@/api/http'
@@ -23,6 +23,7 @@ const activeCurationDataset = ref<DatasetRecord | null>(null)
 /* ---- Create Dataset Dialog ---- */
 const createDialogOpen = ref(false)
 const creatingDataset = ref(false)
+const createFormRef = ref<FormInstance>()
 const createForm = reactive({
   dataset_code: '',
   version_tag: 'v1.0',
@@ -32,11 +33,38 @@ const createForm = reactive({
   status: 'PUBLISHED' as 'DRAFT' | 'PUBLISHED' | 'ARCHIVED',
   description: '',
 })
+const createRules: FormRules = {
+  dataset_code: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写测试集编码')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  version_tag: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写版本标签')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  dataset_name: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写测试集名称')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+}
 
 /* ---- Offline JSONL Import Drawer ---- */
 const importDrawerOpen = ref(false)
 const importingCases = ref(false)
 const importTargetDataset = ref<DatasetRecord | null>(null)
+const importFormRef = ref<FormInstance>()
 const importForm = reactive({
   jsonl_text:
     '{"case_code":"gjj_001","input_text":"常州灵活就业人员如何办理公积金开户？","expected_output":"凭身份证与一类卡线上办理","pii_masked":1,"uncertainty_score":0.76}\n',
@@ -44,11 +72,40 @@ const importForm = reactive({
   desensitize_policy_code: 'gov_eval_corpus',
   dev_ratio: 0.5,
 })
+const importRules: FormRules = {
+  jsonl_text: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请输入至少一行 JSONL 用例数据')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  dev_ratio: [
+    {
+      required: true,
+      type: 'number',
+      min: 0.1,
+      max: 0.9,
+      message: 'DEV 比例须在 0.10 到 0.90 之间',
+      trigger: 'change',
+    },
+  ],
+  desensitize_policy_code: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写脱敏策略编码')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+}
 
 /* ---- Online Read-Only Desensitized Pull Drawer ---- */
 const mysqlDrawerOpen = ref(false)
 const pullingMysql = ref(false)
 const mysqlTargetDataset = ref<DatasetRecord | null>(null)
+const mysqlFormRef = ref<FormInstance>()
 const mysqlForm = reactive({
   source_dsn_env: 'GOV_ONLINE_READONLY_DSN',
   preset_extractor: 'gov_routing_conversation',
@@ -59,16 +116,66 @@ const mysqlForm = reactive({
   desensitize_policy_code: 'gov_eval_corpus',
   dev_ratio: 0.5,
 })
+const mysqlRules: FormRules = {
+  source_dsn_env: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写只读数据源环境变量名')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  preset_extractor: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写预设抽取器名称')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  limit: [
+    {
+      required: true,
+      type: 'number',
+      min: 1,
+      max: 2000,
+      message: '抽样条数须在 1 到 2000 之间',
+      trigger: 'change',
+    },
+  ],
+  desensitize_policy_code: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写脱敏策略编码')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  dev_ratio: [
+    {
+      required: true,
+      type: 'number',
+      min: 0.1,
+      max: 0.9,
+      message: 'DEV 比例须在 0.10 到 0.90 之间',
+      trigger: 'change',
+    },
+  ],
+}
 
 /* ---- Component Snapshot Recorder Drawer ---- */
 const recordDrawerOpen = ref(false)
 const recordingSnapshots = ref(false)
 const recordTargetDataset = ref<DatasetRecord | null>(null)
+const recordFormRef = ref<FormInstance>()
 const recordForm = reactive({
   adapter_code: '',
   split: '' as '' | 'DEV' | 'HOLDOUT',
   only_missing: true,
 })
+const recordRules: FormRules = {
+  adapter_code: [{ required: true, message: '请选择 COMPONENT_HARNESS 类型适配器', trigger: 'change' }],
+}
 
 const componentHarnessAdapters = computed(() =>
   adapters.value.filter((a) => a.adapter_type === 'COMPONENT_HARNESS'),
@@ -111,12 +218,13 @@ function openCreateDataset(): void {
   createForm.eval_level = 'E2E'
   createForm.description = ''
   createDialogOpen.value = true
+  createFormRef.value?.clearValidate()
 }
 
 async function handleCreateDataset(): Promise<void> {
-  if (!createForm.dataset_code.trim() || !createForm.dataset_name.trim()) {
-    ElMessage.warning('请填写测试集编码与名称')
-    return
+  if (createFormRef.value) {
+    const ok = await createFormRef.value.validate().catch(() => false)
+    if (!ok) return
   }
   creatingDataset.value = true
   try {
@@ -142,10 +250,15 @@ async function handleCreateDataset(): Promise<void> {
 function openImportDrawer(row: DatasetRecord): void {
   importTargetDataset.value = row
   importDrawerOpen.value = true
+  importFormRef.value?.clearValidate()
 }
 
 async function handleImportJsonl(): Promise<void> {
-  if (!importTargetDataset.value || !importForm.jsonl_text.trim()) return
+  if (!importTargetDataset.value) return
+  if (importFormRef.value) {
+    const ok = await importFormRef.value.validate().catch(() => false)
+    if (!ok) return
+  }
   importingCases.value = true
   try {
     const res = await datasetsApi.importCases(importTargetDataset.value.id, {
@@ -169,10 +282,15 @@ async function handleImportJsonl(): Promise<void> {
 function openMysqlDrawer(row: DatasetRecord): void {
   mysqlTargetDataset.value = row
   mysqlDrawerOpen.value = true
+  mysqlFormRef.value?.clearValidate()
 }
 
 async function handleMysqlIngest(): Promise<void> {
   if (!mysqlTargetDataset.value) return
+  if (mysqlFormRef.value) {
+    const ok = await mysqlFormRef.value.validate().catch(() => false)
+    if (!ok) return
+  }
   pullingMysql.value = true
   try {
     const res = await datasetsApi.ingestFromMysql(mysqlTargetDataset.value.id, {
@@ -205,12 +323,14 @@ function openRecordSnapshotDrawer(row: DatasetRecord): void {
   recordForm.split = ''
   recordForm.only_missing = true
   recordDrawerOpen.value = true
+  recordFormRef.value?.clearValidate()
 }
 
 async function handleRecordSnapshots(): Promise<void> {
-  if (!recordTargetDataset.value || !recordForm.adapter_code) {
-    ElMessage.warning('请选择 COMPONENT_HARNESS 类型适配器')
-    return
+  if (!recordTargetDataset.value) return
+  if (recordFormRef.value) {
+    const ok = await recordFormRef.value.validate().catch(() => false)
+    if (!ok) return
   }
   recordingSnapshots.value = true
   try {
@@ -384,16 +504,16 @@ onMounted(() => {
 
     <!-- Create Dataset Dialog -->
     <el-dialog v-model="createDialogOpen" title="新增测试集" width="520px">
-      <el-form label-position="top">
+      <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-position="top">
         <div class="ev-grid-2">
-          <el-form-item label="测试集编码 (dataset_code)" required>
+          <el-form-item label="测试集编码 (dataset_code)" prop="dataset_code">
             <el-input v-model="createForm.dataset_code" placeholder="如 gov_e2e_golden" />
           </el-form-item>
-          <el-form-item label="版本标签 (version_tag)" required>
+          <el-form-item label="版本标签 (version_tag)" prop="version_tag">
             <el-input v-model="createForm.version_tag" placeholder="如 v1.0" />
           </el-form-item>
         </div>
-        <el-form-item label="测试集名称" required>
+        <el-form-item label="测试集名称" prop="dataset_name">
           <el-input v-model="createForm.dataset_name" placeholder="如 政务智能客服黄金验收测试集" />
         </el-form-item>
         <div class="ev-grid-2">
@@ -425,8 +545,8 @@ onMounted(() => {
       :title="`离线 JSONL 语料导入 · ${importTargetDataset?.dataset_code || ''}`"
       size="620px"
     >
-      <el-form label-position="top">
-        <el-form-item label="JSONL 文本（每行一条 JSON 用例对象）">
+      <el-form ref="importFormRef" :model="importForm" :rules="importRules" label-position="top">
+        <el-form-item label="JSONL 文本（每行一条 JSON 用例对象）" prop="jsonl_text">
           <el-input
             v-model="importForm.jsonl_text"
             type="textarea"
@@ -435,10 +555,10 @@ onMounted(() => {
           />
         </el-form-item>
         <div class="ev-grid-2">
-          <el-form-item label="DEV 调优集切分比例 (哈希稳定切分)">
+          <el-form-item label="DEV 调优集切分比例 (哈希稳定切分)" prop="dev_ratio">
             <el-input-number v-model="importForm.dev_ratio" :min="0.1" :max="0.9" :step="0.1" :precision="2" />
           </el-form-item>
-          <el-form-item label="脱敏策略编码">
+          <el-form-item label="脱敏策略编码" prop="desensitize_policy_code">
             <el-input v-model="importForm.desensitize_policy_code" />
           </el-form-item>
         </div>
@@ -465,12 +585,12 @@ onMounted(() => {
       <div class="ev-panel ev-notice-mb">
         数据安全红线：流式抽取记录将在内存中先经数据脱敏中心清洗并校验 <code class="ev-mono">pii_masked = 1</code>，绝不落盘原始敏感语料。
       </div>
-      <el-form label-position="top">
+      <el-form ref="mysqlFormRef" :model="mysqlForm" :rules="mysqlRules" label-position="top">
         <div class="ev-grid-2">
-          <el-form-item label="只读数据源环境变量名 (source_dsn_env)">
+          <el-form-item label="只读数据源环境变量名 (source_dsn_env)" prop="source_dsn_env">
             <el-input v-model="mysqlForm.source_dsn_env" />
           </el-form-item>
-          <el-form-item label="预设抽取器 (preset_extractor)">
+          <el-form-item label="预设抽取器 (preset_extractor)" prop="preset_extractor">
             <el-input v-model="mysqlForm.preset_extractor" />
           </el-form-item>
         </div>
@@ -491,13 +611,13 @@ onMounted(() => {
           </el-checkbox-group>
         </el-form-item>
         <div class="ev-grid-3">
-          <el-form-item label="最大抽样条数">
+          <el-form-item label="最大抽样条数" prop="limit">
             <el-input-number v-model="mysqlForm.limit" :min="1" :max="2000" />
           </el-form-item>
-          <el-form-item label="脱敏策略编码">
+          <el-form-item label="脱敏策略编码" prop="desensitize_policy_code">
             <el-input v-model="mysqlForm.desensitize_policy_code" />
           </el-form-item>
-          <el-form-item label="DEV 比例">
+          <el-form-item label="DEV 比例" prop="dev_ratio">
             <el-input-number v-model="mysqlForm.dev_ratio" :min="0.1" :max="0.9" :step="0.1" :precision="2" />
           </el-form-item>
         </div>
@@ -522,8 +642,8 @@ onMounted(() => {
         <strong>Record 录制 vs Replay 回放隔离说明：</strong>
         本操作调用测试环境适配器的 <code class="ev-mono">record_endpoint_url</code> 冻结一次智能体目录与下游候选回复至 <code class="ev-mono">sut_context_json</code>；后续在「实验批次」中发起评测时将走无缓存隔离回放（Replay），零外部依赖验证组件改动。
       </div>
-      <el-form label-position="top">
-        <el-form-item label="选择组件级 Harness 适配器" required>
+      <el-form ref="recordFormRef" :model="recordForm" :rules="recordRules" label-position="top">
+        <el-form-item label="选择组件级 Harness 适配器" prop="adapter_code">
           <el-select v-model="recordForm.adapter_code" style="width: 100%">
             <el-option
               v-for="ad in componentHarnessAdapters"

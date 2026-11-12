@@ -115,6 +115,8 @@ export interface ProviderUpsertPayload {
   status?: ProviderStatus
 }
 
+export type ProviderUpdatePayload = Partial<ProviderUpsertPayload>
+
 export interface ProviderProbeResult {
   ok: boolean
   provider_code: string

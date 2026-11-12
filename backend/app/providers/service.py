@@ -226,7 +226,8 @@ def upsert_provider(
     row.max_options_per_question = payload.max_options_per_question
     row.waf_strip_code_retry = 1 if effective_waf_retry else 0
     row.cost_per_1m_input_tokens = payload.cost_per_1m_input_tokens
-    row.extra_options_json = payload.extra_options_json
+    if is_new or "extra_options_json" in payload.model_fields_set:
+        row.extra_options_json = payload.extra_options_json
     row.status = payload.status
 
     _apply_secret_configuration(

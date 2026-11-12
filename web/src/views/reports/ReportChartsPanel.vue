@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import * as echarts from 'echarts'
 import { prefersReducedMotion, resolveChartPalette } from '@/styles/chartPalette'
+import { formatRegressionTag, REGRESSION_TAG_META } from '@/components/DualStatusBadge.vue'
 import type {
   CompareRunsResult,
   EvalRunDetail,
@@ -94,14 +95,22 @@ const regressionItems = computed<RegressionMetaItem[]>(() => {
   if (!reg) return []
   const total = Math.max(1, reg.total_compared)
   const defs: Array<{ tag: SemanticRegressionTag; label: string; toneClass: string }> = [
-    { tag: 'SAME', label: 'SAME · 语义等价', toneClass: 'ev-reg-pill--same' },
+    { tag: 'SAME', label: REGRESSION_TAG_META.SAME.fullText, toneClass: 'ev-reg-pill--same' },
     {
       tag: 'SPECIFICITY_DIFFERS',
-      label: 'SPECIFICITY · 详略差异',
+      label: REGRESSION_TAG_META.SPECIFICITY_DIFFERS.fullText,
       toneClass: 'ev-reg-pill--spec',
     },
-    { tag: 'ACTION_DIFFERS', label: 'ACTION · 动作分歧', toneClass: 'ev-reg-pill--action' },
-    { tag: 'FACT_DIFFERS', label: 'FACT · 事实冲突', toneClass: 'ev-reg-pill--fact' },
+    {
+      tag: 'ACTION_DIFFERS',
+      label: REGRESSION_TAG_META.ACTION_DIFFERS.fullText,
+      toneClass: 'ev-reg-pill--action',
+    },
+    {
+      tag: 'FACT_DIFFERS',
+      label: REGRESSION_TAG_META.FACT_DIFFERS.fullText,
+      toneClass: 'ev-reg-pill--fact',
+    },
   ]
   return defs.map((item) => {
     const count = Number(reg[item.tag] ?? 0)
@@ -309,10 +318,22 @@ function renderRegressionChart(): void {
     label: string
     color: string
   }> = [
-    { tag: 'SAME', label: '语义等价', color: palette.successSolid },
-    { tag: 'SPECIFICITY_DIFFERS', label: '详略差异', color: palette.splitDev },
-    { tag: 'ACTION_DIFFERS', label: '动作分歧', color: palette.warningSolid },
-    { tag: 'FACT_DIFFERS', label: '事实冲突', color: palette.dangerSolid },
+    { tag: 'SAME', label: REGRESSION_TAG_META.SAME.fullText, color: palette.successSolid },
+    {
+      tag: 'SPECIFICITY_DIFFERS',
+      label: REGRESSION_TAG_META.SPECIFICITY_DIFFERS.fullText,
+      color: palette.splitDev,
+    },
+    {
+      tag: 'ACTION_DIFFERS',
+      label: REGRESSION_TAG_META.ACTION_DIFFERS.fullText,
+      color: palette.warningSolid,
+    },
+    {
+      tag: 'FACT_DIFFERS',
+      label: REGRESSION_TAG_META.FACT_DIFFERS.fullText,
+      color: palette.dangerSolid,
+    },
   ]
 
   regChart.value.setOption(
@@ -328,7 +349,7 @@ function renderRegressionChart(): void {
           const pct = Number(p.value ?? 0)
           const found = tagSpecs.find((t) => t.tag === code)
           const rawCount = reg[code as SemanticRegressionTag] ?? 0
-          return `${found?.label ?? code} (${code})<br/>占比: <b>${pct.toFixed(1)}%</b> (${rawCount} 条)`
+          return `${found?.label ?? formatRegressionTag(code)}<br/>占比: <b>${pct.toFixed(1)}%</b> (${rawCount} 条)`
         },
       },
       xAxis: {
@@ -486,7 +507,7 @@ onBeforeUnmount(() => {
           size="small"
           @click="emit('select-regression-tag', null)"
         >
-          清除回归过滤 ({{ selectedRegressionTag }})
+          清除回归过滤 ({{ formatRegressionTag(selectedRegressionTag) }})
         </el-button>
       </header>
 

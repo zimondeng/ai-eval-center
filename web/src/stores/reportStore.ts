@@ -1,12 +1,15 @@
 import { computed, ref, shallowRef } from 'vue'
 import { defineStore } from 'pinia'
-import { runsApi } from '@/api/endpoints'
+import { runsApi, suitesApi } from '@/api/endpoints'
 import type {
   CompareRunsResult,
   DimensionOverrideInput,
   EvalRunCaseItem,
   EvalRunDetail,
   RecalculateResult,
+  SuiteDimensionBinding,
+  SuiteRecord,
+  SuiteUpsertPayload,
 } from '@/api/types'
 
 export interface EditableDimensionThreshold {
@@ -32,6 +35,8 @@ export const useReportStore = defineStore('report', () => {
   const loadingReport = ref(false)
   const loadingCases = ref(false)
   const recommending = ref(false)
+  const lockingSuite = ref(false)
+  const launchingHoldout = ref(false)
   const errorMessage = ref<string | null>(null)
 
   // Real-time zero-cost threshold calibration state
@@ -219,6 +224,88 @@ export const useReportStore = defineStore('report', () => {
     }
   }
 
+  async function lockThresholdsToSuite(): Promise<SuiteRecord | null> {
+    const run = currentRun.value
+    if (!run || run.dataset_split_filter !== 'DEV' || !run.suite_code) {
+      return null
+    }
+    lockingSuite.value = true
+    try {
+      let existingSuite: SuiteRecord | undefined
+      try {
+        existingSuite = await suitesApi.detail(run.suite_code)
+      } catch {
+        existingSuite = undefined
+      }
+
+      const updatedDimensions: SuiteDimensionBinding[] = dimensionControls.value.map((d) => ({
+        dimension_code: d.dimension_code,
+        version: d.version,
+        weight: d.weight,
+        threshold: d.threshold,
+        is_blocker: d.is_blocker,
+      }))
+
+      const payload: SuiteUpsertPayload = {
+        suite_code: existingSuite?.suite_code ?? run.suite_code,
+        suite_name: existingSuite?.suite_name ?? run.suite_name ?? run.suite_code,
+        eval_level: existingSuite?.eval_level ?? run.eval_level ?? 'E2E',
+        default_adapter_id: existingSuite ? existingSuite.default_adapter_id : run.sut_adapter_id,
+        default_provider_id: existingSuite ? existingSuite.default_provider_id : run.provider_id,
+        default_model_override: existingSuite?.default_model_override ?? null,
+        dimensions_json: updatedDimensions,
+        pass_policy: existingSuite?.pass_policy ?? run.pass_policy ?? 'ALL_BLOCKERS_AND_WEIGHTED',
+        suite_pass_threshold: suitePassThreshold.value,
+        confidence_review_floor:
+          existingSuite?.confidence_review_floor ?? run.confidence_review_floor ?? 0.5,
+        enable_semantic_regression:
+          existingSuite?.enable_semantic_regression ?? run.enable_semantic_regression ?? true,
+        status: existingSuite?.status ?? 'ACTIVE',
+        description: existingSuite?.description ?? null,
+      }
+
+      const updated = await suitesApi.update(run.suite_code, payload)
+      originalSuitePassThreshold.value = suitePassThreshold.value
+      for (const item of dimensionControls.value) {
+        item.original_threshold = item.threshold
+        item.original_weight = item.weight
+        item.original_blocker = item.is_blocker
+      }
+      if (currentRun.value) {
+        currentRun.value.suite_pass_threshold = suitePassThreshold.value
+      }
+      return updated
+    } finally {
+      lockingSuite.value = false
+    }
+  }
+
+  async function launchHoldoutVerificationRun(): Promise<EvalRunDetail | null> {
+    const run = currentRun.value
+    if (!run || run.dataset_split_filter !== 'DEV' || !run.suite_code) {
+      return null
+    }
+    launchingHoldout.value = true
+    try {
+      if (isModifiedFromOriginal.value) {
+        await lockThresholdsToSuite()
+      }
+      const created = await runsApi.create({
+        run_name: `${run.run_name} · HOLDOUT 验真`,
+        suite_code: run.suite_code,
+        dataset_id: run.dataset_id,
+        dataset_split_filter: 'HOLDOUT',
+        sut_adapter_code: run.adapter_code,
+        provider_code: run.provider_code,
+        model_override: run.pinned_model_name || null,
+        sut_fingerprint: run.sut_fingerprint_json ?? {},
+      })
+      return created
+    } finally {
+      launchingHoldout.value = false
+    }
+  }
+
   function openCaseDrawer(row: EvalRunCaseItem): void {
     activeDrawerCase.value = row
   }
@@ -236,6 +323,8 @@ export const useReportStore = defineStore('report', () => {
     loadingReport,
     loadingCases,
     recommending,
+    lockingSuite,
+    launchingHoldout,
     errorMessage,
     suitePassThreshold,
     originalSuitePassThreshold,
@@ -250,6 +339,8 @@ export const useReportStore = defineStore('report', () => {
     scheduleRecalculate,
     resetThresholdsToOriginal,
     recommendOptimalThresholds,
+    lockThresholdsToSuite,
+    launchHoldoutVerificationRun,
     openCaseDrawer,
     closeCaseDrawer,
   }

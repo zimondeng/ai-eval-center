@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, MetaData, Table, create_engine, inspect, select
+from sqlalchemy import DateTime, Engine, MetaData, Table, create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 
 from app.common.crypto import sha256_hex
@@ -357,76 +357,124 @@ def extract_source_records(
             mining_signals=signals_set,
             limit=ingest_filter.limit,
         )
-    else:
-        created_local_engine = False
-        engine = source_engine
-        if engine is None:
-            raw_dsn = os.environ.get(env_key, "").strip()
-            if not raw_dsn:
-                raise AppError(
-                    f"未配置只读数据源环境变量: {env_key}",
-                    status_code=400,
-                    code=400,
-                )
-            validated_dsn = _validate_readonly_dsn(raw_dsn)
-            engine = create_engine(validated_dsn, pool_pre_ping=True)
-            created_local_engine = True
-
-        try:
-            inspector = inspect(engine)
-            available_tables = set(inspector.get_table_names())
-            chosen_table: str | None = None
-            for candidate in PRESET_CANDIDATE_TABLES[preset]:
-                if candidate in available_tables:
-                    chosen_table = candidate
-                    break
-            if chosen_table is None:
-                raise AppError(
-                    f"只读源库中未找到提取器 '{preset}' 所需的数据表",
-                    status_code=400,
-                    code=400,
-                )
-
-            metadata = MetaData()
-            tbl = Table(chosen_table, metadata, autoload_with=engine)
-            stmt = select(tbl)
-
-            if signals_set is not None and "mining_signal" in tbl.c:
-                stmt = stmt.where(tbl.c.mining_signal.in_(sorted(signals_set)))
-
-            order_cols = []
-            if "create_time" in tbl.c:
-                order_cols.append(tbl.c.create_time.asc())
-            elif "created_at" in tbl.c:
-                order_cols.append(tbl.c.created_at.asc())
-            if "id" in tbl.c:
-                order_cols.append(tbl.c.id.asc())
-            if order_cols:
-                stmt = stmt.order_by(*order_cols)
-
-            with engine.connect() as conn:
-                if engine.dialect.name == "sqlite":
-                    conn.exec_driver_sql("PRAGMA query_only = ON")
-                fetched = [dict(r._mapping) for r in conn.execute(stmt)]
-
-            raw_filtered = _filter_rows_in_python(
-                fetched,
-                start_dt=start_dt,
-                end_dt=end_dt,
-                mining_signals=signals_set,
-                limit=ingest_filter.limit,
+        records: list[ExtractedSourceRecord] = []
+        for idx, row_map in enumerate(raw_filtered):
+            rec = _normalize_row_to_record(
+                row_map,
+                preset_extractor=preset,
+                idx=idx,
             )
-        finally:
-            if created_local_engine and engine is not None:
-                engine.dispose()
+            if rec is not None:
+                records.append(rec)
+        return records
 
-    records: list[ExtractedSourceRecord] = []
-    for idx, row_map in enumerate(raw_filtered):
-        rec = _normalize_row_to_record(
-            row_map,
-            preset_extractor=preset,
-            idx=idx,
+    created_local_engine = False
+    engine = source_engine
+    if engine is None:
+        raw_dsn = os.environ.get(env_key, "").strip()
+        if not raw_dsn:
+            raise AppError(
+                f"未配置只读数据源环境变量: {env_key}",
+                status_code=400,
+                code=400,
+            )
+        validated_dsn = _validate_readonly_dsn(raw_dsn)
+        engine = create_engine(validated_dsn, pool_pre_ping=True)
+        created_local_engine = True
+
+    records = []
+    try:
+        inspector = inspect(engine)
+        available_tables = set(inspector.get_table_names())
+        chosen_table: str | None = None
+        for candidate in PRESET_CANDIDATE_TABLES[preset]:
+            if candidate in available_tables:
+                chosen_table = candidate
+                break
+        if chosen_table is None:
+            raise AppError(
+                f"只读源库中未找到提取器 '{preset}' 所需的数据表",
+                status_code=400,
+                code=400,
+            )
+
+        metadata = MetaData()
+        tbl = Table(chosen_table, metadata, autoload_with=engine)
+        stmt = select(tbl)
+
+        if signals_set is not None and "mining_signal" in tbl.c:
+            stmt = stmt.where(tbl.c.mining_signal.in_(sorted(signals_set)))
+
+        ts_col = (
+            tbl.c.create_time
+            if "create_time" in tbl.c
+            else (tbl.c.created_at if "created_at" in tbl.c else None)
         )
-        if rec is not None:
-            records.append(rec)
+        if ts_col is not None and (start_dt is not None or end_dt is not None):
+            if engine.dialect.name == "sqlite" and not isinstance(ts_col.type, DateTime):
+                norm_ts = func.replace(ts_col, "T", " ")
+                if start_dt is not None:
+                    stmt = stmt.where(norm_ts >= start_dt.isoformat(sep=" "))
+                if end_dt is not None:
+                    stmt = stmt.where(norm_ts <= end_dt.isoformat(sep=" "))
+            else:
+                if start_dt is not None:
+                    stmt = stmt.where(ts_col >= start_dt)
+                if end_dt is not None:
+                    stmt = stmt.where(ts_col <= end_dt)
+
+        for input_col_name in ("input_text", "query", "user_query"):
+            if input_col_name in tbl.c:
+                in_col = tbl.c[input_col_name]
+                stmt = stmt.where(in_col.is_not(None), in_col != "")
+                break
+
+        order_cols = []
+        if "create_time" in tbl.c:
+            order_cols.append(tbl.c.create_time.asc())
+        elif "created_at" in tbl.c:
+            order_cols.append(tbl.c.created_at.asc())
+        if "id" in tbl.c:
+            order_cols.append(tbl.c.id.asc())
+        if order_cols:
+            stmt = stmt.order_by(*order_cols)
+
+        has_unpushed_mining = signals_set is not None and "mining_signal" not in tbl.c
+        has_unpushed_time = (start_dt is not None or end_dt is not None) and ts_col is None
+        if not has_unpushed_mining and not has_unpushed_time and ingest_filter.limit > 0:
+            stmt = stmt.limit(int(ingest_filter.limit))
+
+        with engine.connect() as conn:
+            if engine.dialect.name == "mysql":
+                conn.exec_driver_sql("SET SESSION TRANSACTION READ ONLY")
+            elif engine.dialect.name == "sqlite":
+                conn.exec_driver_sql("PRAGMA query_only = ON")
+
+            stream_result = (
+                conn.execution_options(stream_results=True).execute(stmt).yield_per(200)
+            )
+            for idx, row in enumerate(stream_result):
+                row_map = dict(row._mapping)
+                if has_unpushed_mining or has_unpushed_time:
+                    if not _filter_rows_in_python(
+                        [row_map],
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        mining_signals=signals_set,
+                        limit=1,
+                    ):
+                        continue
+                rec = _normalize_row_to_record(
+                    row_map,
+                    preset_extractor=preset,
+                    idx=idx,
+                )
+                if rec is not None:
+                    records.append(rec)
+                    if len(records) >= ingest_filter.limit:
+                        break
+    finally:
+        if created_local_engine and engine is not None:
+            engine.dispose()
+
     return records

@@ -27,6 +27,7 @@ import type {
   PaginatedResult,
   ProviderModelsResult,
   ProviderProbeResult,
+  ProviderUpdatePayload,
   ProviderUpsertPayload,
   RecalculatePayload,
   RecalculateResult,
@@ -75,6 +76,12 @@ export const providersApi = {
   upsert(payload: ProviderUpsertPayload) {
     return apiRequest<DecisionProviderRecord>('/providers', {
       method: 'POST',
+      body: payload,
+    })
+  },
+  update(providerCode: string, payload: ProviderUpdatePayload) {
+    return apiRequest<DecisionProviderRecord>(`/providers/${encodeURIComponent(providerCode)}`, {
+      method: 'PUT',
       body: payload,
     })
   },
@@ -136,6 +143,9 @@ export const dimensionsApi = {
 export const suitesApi = {
   list(params?: { eval_level?: string; status?: string }) {
     return apiRequest<SuiteRecord[]>('/suites', { query: params })
+  },
+  detail(suiteCode: string) {
+    return apiRequest<SuiteRecord>(`/suites/${encodeURIComponent(suiteCode)}`)
   },
   create(payload: SuiteUpsertPayload) {
     return apiRequest<SuiteRecord>('/suites', {

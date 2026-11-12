@@ -54,4 +54,45 @@ describe('SplitBadge & DualStatusBadge (DESIGN.md §4 Rules 3 & 4)', () => {
     expect(regressed.find('[data-testid="dual-label"]').text()).toBe('较基线退化')
     expect(regressed.find('[data-testid="dual-value"]').text()).toBe('-3.60%')
   })
+
+  it('renders all 4 semantic regression tags with symbol + Chinese label + enum code (DESIGN.md §4 Rule 4 & §15 #7)', () => {
+    const cases = [
+      {
+        tag: 'SAME' as const,
+        symbol: '✓',
+        expectedLabel: '实质一致 (SAME)',
+        toneClass: 'ev-dual-badge--success',
+      },
+      {
+        tag: 'SPECIFICITY_DIFFERS' as const,
+        symbol: '~',
+        expectedLabel: '详略差异 (SPECIFICITY_DIFFERS)',
+        toneClass: 'ev-dual-badge--info',
+      },
+      {
+        tag: 'ACTION_DIFFERS' as const,
+        symbol: '!',
+        expectedLabel: '指引变更 (ACTION_DIFFERS)',
+        toneClass: 'ev-dual-badge--warning',
+      },
+      {
+        tag: 'FACT_DIFFERS' as const,
+        symbol: '✕',
+        expectedLabel: '事实退化 (FACT_DIFFERS)',
+        toneClass: 'ev-dual-badge--danger',
+      },
+    ]
+
+    for (const item of cases) {
+      const badge = mount(DualStatusBadge, {
+        props: {
+          regressionTag: item.tag,
+        },
+      })
+      expect(badge.classes()).toContain(item.toneClass)
+      expect(badge.find('[data-testid="dual-symbol"]').text()).toBe(item.symbol)
+      expect(badge.find('[data-testid="dual-label"]').text()).toBe(item.expectedLabel)
+      expect(badge.text()).toContain(`${item.symbol}${item.expectedLabel}`.replace(item.symbol, ''))
+    }
+  })
 })

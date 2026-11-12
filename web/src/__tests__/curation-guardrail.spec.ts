@@ -120,4 +120,56 @@ describe('CurationBenchPanel pii_masked=0 guardrail (DESIGN.md §9 & §12)', () 
       }),
     )
   })
+
+  it('renders el-pagination for datasets with > 100 cases and validates structured JSON inline on el-form', async () => {
+    const maskedCase = makeCase({
+      id: 601,
+      case_code: 'case_page1_601',
+      pii_masked: 1,
+      uncertainty_score: 0.77,
+    })
+
+    vi.mocked(datasetsApi.listCases).mockResolvedValue({
+      items: [maskedCase],
+      total: 240,
+      page: 1,
+      page_size: 100,
+    })
+
+    const wrapper = mount(CurationBenchPanel, {
+      props: {
+        datasetId: 12,
+        datasetName: '政务黄金测试集 v1',
+      },
+    })
+    await flushPromises()
+
+    const pagination = wrapper.findComponent({ name: 'ElPagination' })
+    expect(pagination.exists()).toBe(true)
+    pagination.vm.$emit('update:current-page', 2)
+    pagination.vm.$emit('current-change', 2)
+    await flushPromises()
+    await flushPromises()
+
+    expect(datasetsApi.listCases).toHaveBeenLastCalledWith(
+      12,
+      expect.objectContaining({
+        page: 2,
+        page_size: 100,
+        sort: 'uncertainty_desc',
+      }),
+    )
+
+    // Field-level el-form validation blocks malformed expected_structured_json
+    const textareas = wrapper.findAll('textarea')
+    expect(textareas.length).toBeGreaterThanOrEqual(2)
+    await textareas[1].setValue('{invalid json')
+    await wrapper.find('[data-testid="btn-approve-case"]').trigger('click')
+    await flushPromises()
+    await new Promise((r) => setTimeout(r, 120))
+
+    expect(datasetsApi.curateCase).not.toHaveBeenCalled()
+    expect(wrapper.find('.el-form-item.is-error').exists()).toBe(true)
+    expect(wrapper.find('.el-form-item__error').exists()).toBe(true)
+  })
 })

@@ -535,3 +535,114 @@ async def test_import_record_snapshots_and_recompute_counts_service_invariants(
     assert recompute_dataset_counts(db_session, comp_ds_id) == (0, 1)
 
 
+def test_mysql_sampler_pushes_down_sql_filters_limit_and_mysql_readonly_streaming(
+    tmp_path,
+) -> None:
+    import sqlite3
+    from unittest.mock import MagicMock
+    from sqlalchemy import create_engine, event
+
+    from app.ingestion.mysql_sampler import extract_source_records
+    from app.ingestion.schemas import IngestFilter
+
+    src_db_path = tmp_path / "pushdown_readonly.db"
+    raw_conn = sqlite3.connect(src_db_path)
+    raw_conn.execute(
+        """
+        CREATE TABLE gov_routing_conversation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            input_text TEXT NOT NULL,
+            mining_signal TEXT NOT NULL,
+            create_time TEXT NOT NULL
+        )
+        """
+    )
+    raw_conn.executemany(
+        "INSERT INTO gov_routing_conversation (request_id, input_text, mining_signal, create_time) VALUES (?, ?, ?, ?)",
+        [
+            ("r1", "早期会话", "USER_DISLIKE", "2026-10-01T10:00:00"),
+            ("r2", "命中窗口会话1", "USER_DISLIKE", "2026-11-03T10:00:00"),
+            ("r3", "命中窗口会话2", "USER_DISLIKE", "2026-11-04 12:00:00"),
+            ("r4", "超期会话", "USER_DISLIKE", "2026-12-01T10:00:00"),
+        ],
+    )
+    raw_conn.commit()
+    raw_conn.close()
+
+    src_engine = create_engine(f"sqlite:///{src_db_path.as_posix()}")
+    executed_sql: list[str] = []
+
+    @event.listens_for(src_engine, "before_cursor_execute")
+    def _capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        executed_sql.append(statement)
+
+    try:
+        records = extract_source_records(
+            source_dsn_env="GOV_ONLINE_READONLY_DSN",
+            preset_extractor="gov_routing_conversation",
+            ingest_filter=IngestFilter(
+                start_time="2026-11-01T00:00:00",
+                end_time="2026-11-10T00:00:00",
+                mining_signals=["USER_DISLIKE"],
+                limit=1,
+            ),
+            source_engine=src_engine,
+        )
+    finally:
+        src_engine.dispose()
+
+    assert [r.source_ref_json["request_id"] for r in records] == ["r2"]
+    select_sqls = [
+        s.upper()
+        for s in executed_sql
+        if s.lstrip().upper().startswith("SELECT") and "GOV_ROUTING_CONVERSATION" in s.upper()
+    ]
+    assert len(select_sqls) == 1
+    sel = select_sqls[0]
+    assert "WHERE" in sel
+    assert "CREATE_TIME" in sel
+    assert "MINING_SIGNAL" in sel
+    assert "LIMIT" in sel
+
+    # Verify MySQL dialect issues SET SESSION TRANSACTION READ ONLY and streams via yield_per(200)
+    fake_engine = MagicMock()
+    fake_engine.dialect.name = "mysql"
+    fake_conn = MagicMock()
+    fake_engine.connect.return_value.__enter__.return_value = fake_conn
+    fake_stream_result = MagicMock()
+    fake_stream_result.yield_per.return_value = iter([])
+    fake_conn.execution_options.return_value.execute.return_value = fake_stream_result
+    fake_conn.execute.return_value = fake_stream_result
+
+    import app.ingestion.mysql_sampler as sampler_mod
+    from sqlalchemy import Column, MetaData, String, Table
+
+    orig_inspect = sampler_mod.inspect
+    orig_table = sampler_mod.Table
+    try:
+        fake_inspector = MagicMock()
+        fake_inspector.get_table_names.return_value = ["gov_routing_conversation"]
+        sampler_mod.inspect = lambda _eng: fake_inspector  # type: ignore[assignment]
+        sampler_mod.Table = lambda name, meta, **_kw: Table(  # type: ignore[assignment]
+            name,
+            MetaData(),
+            Column("id", String(32)),
+            Column("input_text", String(255)),
+            Column("create_time", String(32)),
+        )
+        out = extract_source_records(
+            source_dsn_env="GOV_ONLINE_READONLY_DSN",
+            preset_extractor="gov_routing_conversation",
+            ingest_filter=IngestFilter(limit=10),
+            source_engine=fake_engine,
+        )
+    finally:
+        sampler_mod.inspect = orig_inspect  # type: ignore[assignment]
+        sampler_mod.Table = orig_table  # type: ignore[assignment]
+
+    assert out == []
+    fake_conn.exec_driver_sql.assert_any_call("SET SESSION TRANSACTION READ ONLY")
+    fake_stream_result.yield_per.assert_called_once_with(200)
+
+

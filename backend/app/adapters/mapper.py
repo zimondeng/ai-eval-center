@@ -9,11 +9,19 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from jsonpath_ng.exceptions import JsonPathParserError
 from jsonpath_ng.ext import parse as parse_jsonpath
 
-from app.adapters.models import RenderedSutRequest, SutAdapterConfig, SutExecutionInput
+from app.adapters.models import (
+    RenderedSutRequest,
+    SutAdapterConfig,
+    SutExecutionError,
+    SutExecutionInput,
+    SutExecutionResult,
+)
 from app.common.crypto import mask_secret
+from app.common.http_client import request_with_policy
 
 
 @lru_cache(maxsize=256)
@@ -279,3 +287,83 @@ def resolve_sut_network_policy(
     except ValueError:
         pass
     return "PROXY_FALLBACK", None
+
+
+async def dispatch_json_sut_request(
+    config: SutAdapterConfig,
+    rendered: RenderedSutRequest,
+    *,
+    target_label: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> tuple[Any, int, dict[str, Any]]:
+    preview = rendered.to_preview_dict()
+    network_mode, custom_proxy_url = resolve_sut_network_policy(rendered.url, config)
+
+    try:
+        dispatch = await request_with_policy(
+            rendered.method,
+            rendered.url,
+            network_mode=network_mode,
+            custom_proxy_url=custom_proxy_url,
+            timeout_seconds=float(config.timeout_seconds),
+            headers=rendered.headers,
+            json=rendered.body,
+            transport=transport,
+        )
+    except httpx.HTTPError as exc:
+        raise SutExecutionError(
+            f"调用{target_label}网络异常: {exc}",
+            request_preview=preview,
+        ) from exc
+
+    resp = dispatch.response
+    if resp.status_code >= 400:
+        body_snippet = resp.text[:500]
+        raise SutExecutionError(
+            f"{target_label}返回异常状态码 HTTP {resp.status_code}: {body_snippet}",
+            status_code=resp.status_code,
+            request_preview=preview,
+            upstream_body=body_snippet,
+        )
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        body_snippet = resp.text[:500]
+        raise SutExecutionError(
+            f"{target_label}响应非合法 JSON: {body_snippet}",
+            status_code=resp.status_code,
+            request_preview=preview,
+            upstream_body=body_snippet,
+        ) from exc
+
+    return payload, dispatch.elapsed_ms, preview
+
+
+async def execute_json_sut_request(
+    config: SutAdapterConfig,
+    rendered: RenderedSutRequest,
+    *,
+    target_label: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> SutExecutionResult:
+    payload, elapsed_ms, preview = await dispatch_json_sut_request(
+        config,
+        rendered,
+        target_label=target_label,
+        transport=transport,
+    )
+    actual_output, actual_references, actual_structured, sut_trace = extract_sut_response(
+        payload,
+        config.response_mapping_json,
+    )
+    return SutExecutionResult(
+        actual_output=actual_output,
+        actual_references=actual_references,
+        actual_structured=actual_structured,
+        sut_trace=sut_trace,
+        sut_latency_ms=elapsed_ms,
+        ttft_ms=None,
+        raw_response=payload,
+        request_preview=preview,
+    )

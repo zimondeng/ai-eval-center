@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { DataAnalysis, Plus, Refresh, VideoPause } from '@element-plus/icons-vue'
 import {
   adaptersApi,
@@ -10,7 +10,12 @@ import {
   runsApi,
   suitesApi,
 } from '@/api/endpoints'
-import { formatPercent, formatReadableError, formatScore } from '@/api/http'
+import {
+  formatPercent,
+  formatReadableError,
+  formatScore,
+  validateOptionalJsonObject,
+} from '@/api/http'
 import type {
   DatasetRecord,
   DecisionProviderRecord,
@@ -50,6 +55,7 @@ const splitSegmentedOptions = [
 /* ---- Initiate Run Drawer ---- */
 const createDrawerOpen = ref(false)
 const creatingRun = ref(false)
+const runFormRef = ref<FormInstance>()
 const runForm = reactive({
   run_name: '',
   suite_code: '',
@@ -64,6 +70,21 @@ const runForm = reactive({
   component_name: '',
   config_overrides_text: '{}',
 })
+
+const runRules: FormRules = {
+  run_name: [
+    {
+      required: true,
+      validator: (_rule, val: string, cb) =>
+        !val?.trim() ? cb(new Error('请填写实验批次名称')) : cb(),
+      trigger: 'blur',
+    },
+  ],
+  suite_code: [{ required: true, message: '请选择质量门禁套件', trigger: 'change' }],
+  dataset_id: [{ required: true, message: '请选择目标测试集', trigger: 'change' }],
+  dataset_split_filter: [{ required: true, message: '请选择测试集分集范围', trigger: 'change' }],
+  config_overrides_text: [{ validator: validateOptionalJsonObject, trigger: 'blur' }],
+}
 
 const selectedSuite = computed(() =>
   suites.value.find((s) => s.suite_code === runForm.suite_code) ?? null,
@@ -141,6 +162,10 @@ function openInitiateDrawer(): void {
   const firstSuite = suites.value[0]
   runForm.run_name = ''
   runForm.suite_code = firstSuite?.suite_code || ''
+  runForm.dataset_id = null
+  runForm.sut_adapter_code = ''
+  runForm.provider_code = ''
+  runForm.model_override = ''
   runForm.dataset_split_filter = 'DEV'
   runForm.baseline_run_id = null
   runForm.git_sha = ''
@@ -151,23 +176,19 @@ function openInitiateDrawer(): void {
     onSuiteSelected(firstSuite.suite_code)
   }
   createDrawerOpen.value = true
+  runFormRef.value?.clearValidate()
 }
 
 async function handleCreateRun(): Promise<void> {
-  if (!runForm.run_name.trim() || !runForm.suite_code || !runForm.dataset_id) {
-    ElMessage.warning('请填写批次名称并选择评测套件与测试集')
-    return
+  if (runFormRef.value) {
+    const ok = await runFormRef.value.validate().catch(() => false)
+    if (!ok) return
   }
+  if (!runForm.dataset_id) return
 
-  let overridesObj: Record<string, unknown> = {}
-  if (runForm.config_overrides_text.trim()) {
-    try {
-      overridesObj = JSON.parse(runForm.config_overrides_text) as Record<string, unknown>
-    } catch {
-      ElMessage.error('运行覆盖参数 JSON 格式不合法')
-      return
-    }
-  }
+  const overridesObj = runForm.config_overrides_text.trim()
+    ? (JSON.parse(runForm.config_overrides_text) as Record<string, unknown>)
+    : {}
 
   const fingerprint: Record<string, unknown> = {}
   if (runForm.git_sha.trim()) fingerprint.git_sha = runForm.git_sha.trim()
@@ -399,16 +420,27 @@ onMounted(() => {
                 >
                   评估报告
                 </el-button>
-                <el-button
+                <el-popconfirm
                   v-if="row.status === 'RUNNING' || row.status === 'PENDING'"
-                  size="small"
-                  type="danger"
-                  plain
-                  :icon="VideoPause"
-                  @click="handleCancelRun(row)"
+                  title="确定终止该运行中的实验批次吗？已评完用例将保留。"
+                  confirm-button-text="确认取消"
+                  cancel-button-text="返回"
+                  confirm-button-type="danger"
+                  width="280"
+                  @confirm="handleCancelRun(row)"
                 >
-                  取消
-                </el-button>
+                  <template #reference>
+                    <el-button
+                      data-testid="btn-cancel-run"
+                      size="small"
+                      type="danger"
+                      plain
+                      :icon="VideoPause"
+                    >
+                      取消
+                    </el-button>
+                  </template>
+                </el-popconfirm>
               </div>
             </template>
           </el-table-column>
@@ -428,8 +460,8 @@ onMounted(() => {
 
     <!-- Initiate Experiment Run Drawer (DESIGN.md §10) -->
     <el-drawer v-model="createDrawerOpen" title="发起实验批次" size="620px">
-      <el-form label-position="top">
-        <el-form-item label="1. 实验批次名称 (run_name)" required>
+      <el-form ref="runFormRef" :model="runForm" :rules="runRules" label-position="top">
+        <el-form-item label="1. 实验批次名称 (run_name)" prop="run_name">
           <el-input
             v-model="runForm.run_name"
             placeholder="如 路由主管提示词 v2 消融实验 (本地 tev1:0.8b)"
@@ -437,7 +469,7 @@ onMounted(() => {
         </el-form-item>
 
         <div class="ev-grid-2">
-          <el-form-item label="2. 选择质量门禁套件 (suite_code)" required>
+          <el-form-item label="2. 选择质量门禁套件 (suite_code)" prop="suite_code">
             <el-select
               v-model="runForm.suite_code"
               style="width: 100%"
@@ -452,7 +484,7 @@ onMounted(() => {
             </el-select>
           </el-form-item>
 
-          <el-form-item label="3. 选择目标测试集 (dataset_id)" required>
+          <el-form-item label="3. 选择目标测试集 (dataset_id)" prop="dataset_id">
             <el-select v-model="runForm.dataset_id" style="width: 100%">
               <el-option
                 v-for="ds in compatibleDatasets"
@@ -464,7 +496,7 @@ onMounted(() => {
           </el-form-item>
         </div>
 
-        <el-form-item label="4. 固定测试集分集范围 (dataset_split_filter)" required>
+        <el-form-item label="4. 固定测试集分集范围 (dataset_split_filter)" prop="dataset_split_filter">
           <el-radio-group v-model="runForm.dataset_split_filter">
             <el-radio value="DEV">DEV 调优集（用于日常迭代与自动阈值寻优）</el-radio>
             <el-radio value="HOLDOUT">HOLDOUT 留出验真集（用于发版门禁最终验收）</el-radio>
@@ -524,7 +556,7 @@ onMounted(() => {
               <el-input v-model="runForm.component_name" placeholder="如 SupervisorRouter" class="ev-mono" />
             </el-form-item>
           </div>
-          <el-form-item label="消融覆盖参数 JSON (config_overrides)">
+          <el-form-item label="消融覆盖参数 JSON (config_overrides)" prop="config_overrides_text">
             <el-input
               v-model="runForm.config_overrides_text"
               type="textarea"
@@ -538,7 +570,12 @@ onMounted(() => {
       <template #footer>
         <div class="ev-drawer-footer">
           <el-button @click="createDrawerOpen = false">取消</el-button>
-          <el-button type="primary" :loading="creatingRun" @click="handleCreateRun">
+          <el-button
+            data-testid="btn-submit-create-run"
+            type="primary"
+            :loading="creatingRun"
+            @click="handleCreateRun"
+          >
             立即发起实验批次
           </el-button>
         </div>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ArrowLeft, ArrowRight, WarningFilled } from '@element-plus/icons-vue'
+import { formatScore } from '@/api/http'
 import SplitBadge from '@/components/SplitBadge.vue'
 import DualStatusBadge from '@/components/DualStatusBadge.vue'
 import type { AtomicAnswerLedgerItem, EvalRunCaseItem } from '@/api/types'
@@ -28,11 +29,6 @@ const lowConfidenceMessage = computed(() => {
       : '0.000'
   return `该用例存在原子题判别把握度低于复核线（最低 confidence = ${val}），建议人工核对实际输出与标准答案。`
 })
-
-function formatScore(val: number | null | undefined, digits = 3): string {
-  if (val === null || val === undefined || Number.isNaN(val)) return '--'
-  return val.toFixed(digits)
-}
 
 function resolveProbabilityEntries(q: AtomicAnswerLedgerItem): Array<{ key: string; prob: number }> {
   if (q.probabilities && typeof q.probabilities === 'object') {
@@ -70,11 +66,12 @@ function resolveProbabilityEntries(q: AtomicAnswerLedgerItem): Array<{ key: stri
           <DualStatusBadge
             :tone="caseItem.overall_passed ? 'success' : 'danger'"
             :label="caseItem.overall_passed ? '门禁通过' : '门禁拦截'"
-            :value="formatScore(caseItem.overall_score)"
+            :value="formatScore(caseItem.overall_score, 3)"
           />
-          <span v-if="caseItem.regression_tag" class="ev-ledger-reg-tag ev-mono">
-            {{ caseItem.regression_tag }}
-          </span>
+          <DualStatusBadge
+            v-if="caseItem.regression_tag"
+            :regression-tag="caseItem.regression_tag"
+          />
         </div>
 
         <div class="ev-ledger-head__nav">
@@ -173,7 +170,7 @@ function resolveProbabilityEntries(q: AtomicAnswerLedgerItem): Array<{ key: stri
               <DualStatusBadge
                 :tone="ledger.passed ? 'success' : 'danger'"
                 :label="ledger.passed ? '达标' : '未达标'"
-                :value="formatScore(ledger.raw_dimension_score)"
+                :value="formatScore(ledger.raw_dimension_score, 3)"
               />
             </div>
           </div>
@@ -284,14 +281,6 @@ function resolveProbabilityEntries(q: AtomicAnswerLedgerItem): Array<{ key: stri
   font-size: var(--ev-fs-title);
   font-weight: 600;
   color: var(--ev-text-primary);
-}
-
-.ev-ledger-reg-tag {
-  padding: 2px 6px;
-  border-radius: var(--ev-radius-sm);
-  font-size: var(--ev-fs-label);
-  background-color: var(--ev-color-neutral-subtle);
-  color: var(--ev-color-neutral);
 }
 
 .ev-ledger-head__nav {

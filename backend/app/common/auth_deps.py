@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
+import threading
+import time
 from typing import Any, Literal
 
 import jwt
@@ -15,6 +18,29 @@ from app.config import Settings, get_settings
 from app.db.base import utcnow_naive
 from app.db.models import AdminUser, ApiKey
 from app.db.session import get_db
+
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_rate_limit_lock = threading.Lock()
+_api_key_request_windows: dict[int, deque[float]] = {}
+
+
+def reset_api_key_rate_limiter() -> None:
+    with _rate_limit_lock:
+        _api_key_request_windows.clear()
+
+
+def _enforce_api_key_rate_limit(key_id: int, rate_limit_rpm: int) -> None:
+    if rate_limit_rpm <= 0:
+        return
+    now_mono = time.monotonic()
+    cutoff = now_mono - _RATE_LIMIT_WINDOW_SECONDS
+    with _rate_limit_lock:
+        window = _api_key_request_windows.setdefault(key_id, deque())
+        while window and window[0] <= cutoff:
+            window.popleft()
+        if len(window) >= rate_limit_rpm:
+            raise AppError("API Key 每分钟请求频率超限", status_code=429, code=429)
+        window.append(now_mono)
 
 
 class CurrentPrincipal(BaseModel):
@@ -131,6 +157,8 @@ def require_console_or_api_key(
         raise AppError("API Key 无效或已被吊销", status_code=401, code=401)
     if key_row.expires_at is not None and key_row.expires_at <= now:
         raise AppError("API Key 已过期", status_code=401, code=401)
+
+    _enforce_api_key_rate_limit(int(key_row.id), int(key_row.rate_limit_rpm or 0))
 
     key_row.last_used_at = now
     db.commit()

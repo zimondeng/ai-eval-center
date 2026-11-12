@@ -496,6 +496,69 @@ def _upsert_or_skip_case_by_code(
     return existing, False
 
 
+def _apply_case_payload(
+    db: Session,
+    *,
+    dataset_id: int,
+    case_code: str,
+    revivable: EvalCase | None,
+    now: datetime,
+    dataset_split: str,
+    source_kind: str,
+    source_ref_json: dict[str, Any] | None,
+    turn_mode: str,
+    input_text: str,
+    conversation_turns_json: list[dict[str, Any]] | None,
+    expected_output: str | None,
+    expected_outcome: str | None,
+    reference_contexts_json: list[str] | None,
+    expected_structured_json: dict[str, Any] | None,
+    sut_input_json: dict[str, Any] | None,
+    sut_context_json: dict[str, Any] | None,
+    tags_json: list[str] | None,
+    difficulty: str,
+    pii_masked: int,
+    desensitize_summary_json: dict[str, int] | None,
+    uncertainty_score: float | None,
+    review_status: str,
+    reviewed_by: str | None = None,
+    reviewed_at: datetime | None = None,
+    review_note: str | None = None,
+) -> EvalCase:
+    if revivable is not None:
+        row = revivable
+        row.uuid = new_uuid_hex()
+    else:
+        row = EvalCase(dataset_id=dataset_id, case_code=case_code)
+        db.add(row)
+
+    row.dataset_split = dataset_split
+    row.source_kind = source_kind
+    row.source_ref_json = source_ref_json
+    row.turn_mode = turn_mode
+    row.input_text = input_text
+    row.conversation_turns_json = conversation_turns_json
+    row.expected_output = expected_output
+    row.expected_outcome = expected_outcome
+    row.reference_contexts_json = reference_contexts_json
+    row.expected_structured_json = expected_structured_json
+    row.sut_input_json = sut_input_json
+    row.sut_context_json = sut_context_json
+    row.tags_json = tags_json
+    row.difficulty = difficulty
+    row.pii_masked = int(pii_masked)
+    row.desensitize_summary_json = desensitize_summary_json
+    row.uncertainty_score = uncertainty_score
+    row.review_status = review_status
+    row.reviewed_by = reviewed_by
+    row.reviewed_at = reviewed_at
+    row.review_note = review_note
+    row.is_deleted = 0
+    row.create_time = now
+    row.update_time = now
+    return row
+
+
 def _parse_import_items(payload: DatasetImportRequest) -> list[CaseImportItem]:
     parsed: list[CaseImportItem] = []
     if payload.cases:
@@ -647,63 +710,34 @@ async def import_cases(
         reviewed_by = operator if rev_status == "APPROVED" else None
         reviewed_at = now if rev_status == "APPROVED" else None
 
-        if revivable is not None:
-            row = revivable
-            row.uuid = new_uuid_hex()
-            row.dataset_split = meta["dataset_split"]
-            row.source_kind = meta["source_kind"]
-            row.source_ref_json = meta["source_ref_json"]
-            row.turn_mode = meta["turn_mode"]
-            row.input_text = draft.input_text
-            row.conversation_turns_json = draft.conversation_turns_json
-            row.expected_output = draft.expected_output
-            row.expected_outcome = draft.expected_outcome
-            row.reference_contexts_json = draft.reference_contexts_json
-            row.expected_structured_json = meta["expected_structured_json"]
-            row.sut_input_json = meta["sut_input_json"]
-            row.sut_context_json = meta["sut_context_json"]
-            row.tags_json = meta["tags_json"]
-            row.difficulty = meta["difficulty"]
-            row.pii_masked = int(draft.pii_masked)
-            row.desensitize_summary_json = draft.desensitize_summary_json
-            row.uncertainty_score = meta["uncertainty_score"]
-            row.review_status = rev_status
-            row.reviewed_by = reviewed_by
-            row.reviewed_at = reviewed_at
-            row.review_note = meta["review_note"]
-            row.is_deleted = 0
-            row.create_time = now
-            row.update_time = now
-        else:
-            row = EvalCase(
-                dataset_id=dataset.id,
-                case_code=code,
-                dataset_split=meta["dataset_split"],
-                source_kind=meta["source_kind"],
-                source_ref_json=meta["source_ref_json"],
-                turn_mode=meta["turn_mode"],
-                input_text=draft.input_text,
-                conversation_turns_json=draft.conversation_turns_json,
-                expected_output=draft.expected_output,
-                expected_outcome=draft.expected_outcome,
-                reference_contexts_json=draft.reference_contexts_json,
-                expected_structured_json=meta["expected_structured_json"],
-                sut_input_json=meta["sut_input_json"],
-                sut_context_json=meta["sut_context_json"],
-                tags_json=meta["tags_json"],
-                difficulty=meta["difficulty"],
-                pii_masked=int(draft.pii_masked),
-                desensitize_summary_json=draft.desensitize_summary_json,
-                uncertainty_score=meta["uncertainty_score"],
-                review_status=rev_status,
-                reviewed_by=reviewed_by,
-                reviewed_at=reviewed_at,
-                review_note=meta["review_note"],
-                is_deleted=0,
-                create_time=now,
-                update_time=now,
-            )
-            db.add(row)
+        _apply_case_payload(
+            db,
+            dataset_id=dataset.id,
+            case_code=code,
+            revivable=revivable,
+            now=now,
+            dataset_split=meta["dataset_split"],
+            source_kind=meta["source_kind"],
+            source_ref_json=meta["source_ref_json"],
+            turn_mode=meta["turn_mode"],
+            input_text=draft.input_text,
+            conversation_turns_json=draft.conversation_turns_json,
+            expected_output=draft.expected_output,
+            expected_outcome=draft.expected_outcome,
+            reference_contexts_json=draft.reference_contexts_json,
+            expected_structured_json=meta["expected_structured_json"],
+            sut_input_json=meta["sut_input_json"],
+            sut_context_json=meta["sut_context_json"],
+            tags_json=meta["tags_json"],
+            difficulty=meta["difficulty"],
+            pii_masked=int(draft.pii_masked),
+            desensitize_summary_json=draft.desensitize_summary_json,
+            uncertainty_score=meta["uncertainty_score"],
+            review_status=rev_status,
+            reviewed_by=reviewed_by,
+            reviewed_at=reviewed_at,
+            review_note=meta["review_note"],
+        )
 
         imported_count += 1
         if meta["dataset_split"] == "DEV":
@@ -809,60 +843,31 @@ async def ingest_from_mysql(
                 continue
 
             split_val = assign_dataset_split(rec.case_code, dev_ratio=payload.dev_ratio)
-            if revivable is not None:
-                row = revivable
-                row.uuid = new_uuid_hex()
-                row.dataset_split = split_val
-                row.source_kind = "ONLINE_PULL"
-                row.source_ref_json = rec.source_ref_json
-                row.turn_mode = rec.turn_mode
-                row.input_text = draft.input_text
-                row.conversation_turns_json = draft.conversation_turns_json
-                row.expected_output = draft.expected_output
-                row.expected_outcome = None
-                row.reference_contexts_json = draft.reference_contexts_json
-                row.expected_structured_json = rec.expected_structured_json
-                row.sut_input_json = rec.sut_input_json
-                row.sut_context_json = None
-                row.tags_json = rec.tags_json
-                row.difficulty = "NORMAL"
-                row.pii_masked = 1
-                row.desensitize_summary_json = draft.desensitize_summary_json
-                row.uncertainty_score = None
-                row.review_status = "PENDING_REVIEW"
-                row.reviewed_by = None
-                row.reviewed_at = None
-                row.review_note = None
-                row.is_deleted = 0
-                row.create_time = now
-                row.update_time = now
-            else:
-                row = EvalCase(
-                    dataset_id=dataset.id,
-                    case_code=rec.case_code,
-                    dataset_split=split_val,
-                    source_kind="ONLINE_PULL",
-                    source_ref_json=rec.source_ref_json,
-                    turn_mode=rec.turn_mode,
-                    input_text=draft.input_text,
-                    conversation_turns_json=draft.conversation_turns_json,
-                    expected_output=draft.expected_output,
-                    expected_outcome=None,
-                    reference_contexts_json=draft.reference_contexts_json,
-                    expected_structured_json=rec.expected_structured_json,
-                    sut_input_json=rec.sut_input_json,
-                    sut_context_json=None,
-                    tags_json=rec.tags_json,
-                    difficulty="NORMAL",
-                    pii_masked=1,
-                    desensitize_summary_json=draft.desensitize_summary_json,
-                    uncertainty_score=None,
-                    review_status="PENDING_REVIEW",
-                    is_deleted=0,
-                    create_time=now,
-                    update_time=now,
-                )
-                db.add(row)
+            _apply_case_payload(
+                db,
+                dataset_id=dataset.id,
+                case_code=rec.case_code,
+                revivable=revivable,
+                now=now,
+                dataset_split=split_val,
+                source_kind="ONLINE_PULL",
+                source_ref_json=rec.source_ref_json,
+                turn_mode=rec.turn_mode,
+                input_text=draft.input_text,
+                conversation_turns_json=draft.conversation_turns_json,
+                expected_output=draft.expected_output,
+                expected_outcome=None,
+                reference_contexts_json=draft.reference_contexts_json,
+                expected_structured_json=rec.expected_structured_json,
+                sut_input_json=rec.sut_input_json,
+                sut_context_json=None,
+                tags_json=rec.tags_json,
+                difficulty="NORMAL",
+                pii_masked=1,
+                desensitize_summary_json=draft.desensitize_summary_json,
+                uncertainty_score=None,
+                review_status="PENDING_REVIEW",
+            )
 
             ingested_count += 1
             if split_val == "DEV":
@@ -1141,63 +1146,34 @@ def create_manual_case(
     reviewed_by = operator if payload.review_status == "APPROVED" else None
     reviewed_at = now if payload.review_status == "APPROVED" else None
 
-    if revivable is not None:
-        row = revivable
-        row.uuid = new_uuid_hex()
-        row.dataset_split = split_val
-        row.source_kind = payload.source_kind
-        row.source_ref_json = payload.source_ref_json
-        row.turn_mode = payload.turn_mode
-        row.input_text = payload.input_text
-        row.conversation_turns_json = payload.conversation_turns_json
-        row.expected_output = payload.expected_output
-        row.expected_outcome = payload.expected_outcome
-        row.reference_contexts_json = payload.reference_contexts_json
-        row.expected_structured_json = payload.expected_structured_json
-        row.sut_input_json = payload.sut_input_json
-        row.sut_context_json = payload.sut_context_json
-        row.tags_json = payload.tags_json
-        row.difficulty = payload.difficulty
-        row.pii_masked = pii_val
-        row.desensitize_summary_json = sanitized_summary
-        row.uncertainty_score = payload.uncertainty_score
-        row.review_status = payload.review_status
-        row.reviewed_by = reviewed_by
-        row.reviewed_at = reviewed_at
-        row.review_note = payload.review_note
-        row.is_deleted = 0
-        row.create_time = now
-        row.update_time = now
-    else:
-        row = EvalCase(
-            dataset_id=dataset.id,
-            case_code=code,
-            dataset_split=split_val,
-            source_kind=payload.source_kind,
-            source_ref_json=payload.source_ref_json,
-            turn_mode=payload.turn_mode,
-            input_text=payload.input_text,
-            conversation_turns_json=payload.conversation_turns_json,
-            expected_output=payload.expected_output,
-            expected_outcome=payload.expected_outcome,
-            reference_contexts_json=payload.reference_contexts_json,
-            expected_structured_json=payload.expected_structured_json,
-            sut_input_json=payload.sut_input_json,
-            sut_context_json=payload.sut_context_json,
-            tags_json=payload.tags_json,
-            difficulty=payload.difficulty,
-            pii_masked=pii_val,
-            desensitize_summary_json=sanitized_summary,
-            uncertainty_score=payload.uncertainty_score,
-            review_status=payload.review_status,
-            reviewed_by=reviewed_by,
-            reviewed_at=reviewed_at,
-            review_note=payload.review_note,
-            is_deleted=0,
-            create_time=now,
-            update_time=now,
-        )
-        db.add(row)
+    row = _apply_case_payload(
+        db,
+        dataset_id=dataset.id,
+        case_code=code,
+        revivable=revivable,
+        now=now,
+        dataset_split=split_val,
+        source_kind=payload.source_kind,
+        source_ref_json=payload.source_ref_json,
+        turn_mode=payload.turn_mode,
+        input_text=payload.input_text,
+        conversation_turns_json=payload.conversation_turns_json,
+        expected_output=payload.expected_output,
+        expected_outcome=payload.expected_outcome,
+        reference_contexts_json=payload.reference_contexts_json,
+        expected_structured_json=payload.expected_structured_json,
+        sut_input_json=payload.sut_input_json,
+        sut_context_json=payload.sut_context_json,
+        tags_json=payload.tags_json,
+        difficulty=payload.difficulty,
+        pii_masked=pii_val,
+        desensitize_summary_json=sanitized_summary,
+        uncertainty_score=payload.uncertainty_score,
+        review_status=payload.review_status,
+        reviewed_by=reviewed_by,
+        reviewed_at=reviewed_at,
+        review_note=payload.review_note,
+    )
 
     recompute_dataset_counts(db, dataset.id)
     db.commit()

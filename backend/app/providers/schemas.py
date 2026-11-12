@@ -30,7 +30,7 @@ class ProviderUpsertRequest(BaseModel):
     max_options_per_question: int = Field(default=24, ge=2, le=64)
     waf_strip_code_retry: bool | None = None
     cost_per_1m_input_tokens: float = Field(default=0.0, ge=0.0)
-    extra_options_json: dict[str, Any] | None = None
+    extra_options_json: dict[str, Any] | None = Field(default=None)
     is_default: bool = False
     status: ProviderStatus = "ACTIVE"
 
@@ -55,7 +55,7 @@ class ProviderUpdateRequest(BaseModel):
     max_options_per_question: int | None = Field(default=None, ge=2, le=64)
     waf_strip_code_retry: bool | None = None
     cost_per_1m_input_tokens: float | None = Field(default=None, ge=0.0)
-    extra_options_json: dict[str, Any] | None = None
+    extra_options_json: dict[str, Any] | None = Field(default=None)
     is_default: bool | None = None
     status: ProviderStatus | None = None
 

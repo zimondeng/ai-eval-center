@@ -320,6 +320,21 @@ async def test_create_and_execute_run_snapshots_metrics_and_error_isolation(
         assert detail["suite_pass_threshold"] == pytest.approx(0.75)
         assert detail["confidence_review_floor"] == pytest.approx(0.50)
         assert detail["unbatched_question_count"] >= 10
+
+        # Completed run cases populate ev_case.uncertainty_score = 1 - min_confidence
+        # so low-confidence cases surface at the top of sort=uncertainty_desc
+        cur_cases_resp = await client.get(
+            f"/api/v1/datasets/{ds_id}/cases",
+            params={"split": "DEV", "sort": "uncertainty_desc"},
+            headers=admin_headers,
+        )
+        assert cur_cases_resp.status_code == 200
+        cur_items = cur_cases_resp.json()["data"]["items"]
+        assert cur_items[0]["case_code"] == "dev_fail_2"
+        assert cur_items[0]["uncertainty_score"] == pytest.approx(0.58)
+        assert cur_items[1]["case_code"] == "dev_pass_1"
+        # choice question has 4 options with p_max=0.90 -> conf=(4*0.9-1)/3=0.8667 -> 1-0.8667=0.1333
+        assert cur_items[1]["uncertainty_score"] == pytest.approx(0.1333)
     finally:
         app.dependency_overrides.pop(get_sut_http_transport, None)
         app.dependency_overrides.pop(get_provider_http_transport, None)
@@ -1197,8 +1212,9 @@ async def test_recommend_thresholds_rejects_holdout_400_and_optimizes_youden_j_a
         assert 0.47 <= f1_data["dimension_overrides"]["rag_faithfulness_s1"]["threshold"] <= 0.52
         assert f1_data["best_f1"] == pytest.approx(1.0)
 
-        # Distribution fallback when explicit ground-truth binary labels are absent
-        unlabeled_ds_id, _ = await _create_dataset_with_cases(
+        # Unlabeled (or single-class) DEV runs MUST be rejected with 400 rather than
+        # silently inventing unsupervised Otsu/P25 thresholds (docs/02 L160).
+        unlabeled_ds_id, unlabeled_map = await _create_dataset_with_cases(
             client,
             admin_headers,
             dataset_code="thresh_unlabeled_dev_ds",
@@ -1219,7 +1235,7 @@ async def test_recommend_thresholds_rejects_holdout_400_and_optimizes_youden_j_a
                 "/api/v1/runs",
                 headers=admin_headers,
                 json={
-                    "run_name": "无标签DEV分布寻优",
+                    "run_name": "无标签DEV跑批",
                     "suite_code": "suite_gov_e2e_golden_v1",
                     "dataset_id": unlabeled_ds_id,
                     "dataset_split_filter": "DEV",
@@ -1228,14 +1244,25 @@ async def test_recommend_thresholds_rejects_holdout_400_and_optimizes_youden_j_a
                 },
             )
         ).json()["data"]
-        fallback_rec = (
-            await client.post(
-                f"/api/v1/runs/{unlabeled_run['run_no']}/recommend-thresholds",
-                headers=admin_headers,
-            )
-        ).json()["data"]
-        assert fallback_rec["label_source"] == "distribution_fallback"
-        assert 0.45 <= fallback_rec["dimension_overrides"]["rag_faithfulness_s1"]["threshold"] <= 0.86
+        unlabeled_rec_resp = await client.post(
+            f"/api/v1/runs/{unlabeled_run['run_no']}/recommend-thresholds",
+            headers=admin_headers,
+        )
+        assert unlabeled_rec_resp.status_code == 400
+        assert unlabeled_rec_resp.json()["code"] == 400
+        assert "正" in unlabeled_rec_resp.json()["message"] and "负" in unlabeled_rec_resp.json()["message"]
+
+        single_class_resp = await client.post(
+            f"/api/v1/runs/{unlabeled_run['run_no']}/recommend-thresholds",
+            headers=admin_headers,
+            json={
+                "labels": {
+                    unlabeled_map["unlbl_0"]["case_code"]: 1,
+                    unlabeled_map["unlbl_1"]["case_code"]: 1,
+                }
+            },
+        )
+        assert single_class_resp.status_code == 400
 
         # 4. Guardrail against post-run split contamination: if a case in DEV run is moved to HOLDOUT -> 400!
         tampered_case = db_session.get(EvalCase, created_map["dev_pos_6"]["id"])

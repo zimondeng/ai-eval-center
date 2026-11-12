@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.providers.client import compute_normalized_confidence, parse_noul_answer
-
-
-def _is_real_num(val: Any) -> bool:
-    return (
-        isinstance(val, (int, float))
-        and not isinstance(val, bool)
-        and math.isfinite(float(val))
-    )
+from app.providers.client import (
+    _is_real_number,
+    compute_normalized_confidence,
+    parse_noul_answer,
+)
 
 
 def compute_noul_score(raw_or_p_true: float | Mapping[str, Any]) -> float:
@@ -21,7 +16,7 @@ def compute_noul_score(raw_or_p_true: float | Mapping[str, Any]) -> float:
     if isinstance(raw_or_p_true, Mapping):
         p_true, _ = parse_noul_answer(raw_or_p_true)
         return p_true
-    if not _is_real_num(raw_or_p_true):
+    if not _is_real_number(raw_or_p_true):
         raise ValueError(f"非法的 noul 概率值: {raw_or_p_true!r}")
     p_val = float(raw_or_p_true)
     if not (-1e-6 <= p_val <= 1.0 + 1e-6):
@@ -98,7 +93,7 @@ def parse_score_answer(
     dist_source: Any = raw_answer
 
     if isinstance(raw_answer, Mapping):
-        if _is_real_num(raw_answer.get("confidence")):
+        if _is_real_number(raw_answer.get("confidence")):
             upstream_conf = float(raw_answer["confidence"])
         for key in ("probabilities", "distribution", "probs", "scores"):
             val = raw_answer.get(key)
@@ -114,13 +109,13 @@ def parse_score_answer(
 
     tier_probs: list[float] | None = None
     if isinstance(dist_source, Sequence) and not isinstance(dist_source, (str, bytes)):
-        if len(dist_source) != k or not all(_is_real_num(v) for v in dist_source):
+        if len(dist_source) != k or not all(_is_real_number(v) for v in dist_source):
             raise ValueError(f"Score 题概率数组长度或数值非法: {raw_answer!r}")
         tier_probs = [max(0.0, float(v)) for v in dist_source]
     elif isinstance(dist_source, Mapping):
         if any(
-            (str(i) in dist_source and _is_real_num(dist_source[str(i)]))
-            or (i in dist_source and _is_real_num(dist_source[i]))
+            (str(i) in dist_source and _is_real_number(dist_source[str(i)]))
+            or (i in dist_source and _is_real_number(dist_source[i]))
             for i in range(k)
         ):
             tier_probs = [
@@ -128,11 +123,11 @@ def parse_score_answer(
                 for i in range(k)
             ]
         elif "0" not in dist_source and all(
-            str(i) in dist_source and _is_real_num(dist_source[str(i)])
+            str(i) in dist_source and _is_real_number(dist_source[str(i)])
             for i in range(1, k + 1)
         ):
             tier_probs = [max(0.0, float(dist_source[str(i)])) for i in range(1, k + 1)]
-        elif any(str(c) in dist_source and _is_real_num(dist_source[str(c)]) for c in criteria):
+        elif any(str(c) in dist_source and _is_real_number(dist_source[str(c)]) for c in criteria):
             tier_probs = [max(0.0, float(dist_source.get(str(c), 0.0))) for c in criteria]
 
     if tier_probs is None:
@@ -167,7 +162,7 @@ def parse_choice_answer(
         return probs_map, raw_answer, 1.0
 
     if isinstance(raw_answer, Mapping):
-        if _is_real_num(raw_answer.get("confidence")):
+        if _is_real_number(raw_answer.get("confidence")):
             upstream_conf = float(raw_answer["confidence"])
         for chosen_field in ("chosen", "selected", "answer"):
             cval = raw_answer.get(chosen_field)
@@ -192,12 +187,12 @@ def parse_choice_answer(
 
     raw_probs: list[float] | None = None
     if isinstance(dist_source, Sequence) and not isinstance(dist_source, (str, bytes)):
-        if len(dist_source) == len(option_keys) and all(_is_real_num(v) for v in dist_source):
+        if len(dist_source) == len(option_keys) and all(_is_real_number(v) for v in dist_source):
             raw_probs = [max(0.0, float(v)) for v in dist_source]
     elif isinstance(dist_source, Mapping):
-        if any(opt in dist_source and _is_real_num(dist_source[opt]) for opt in option_keys):
+        if any(opt in dist_source and _is_real_number(dist_source[opt]) for opt in option_keys):
             raw_probs = [
-                max(0.0, float(dist_source[opt])) if _is_real_num(dist_source.get(opt)) else 0.0
+                max(0.0, float(dist_source[opt])) if _is_real_number(dist_source.get(opt)) else 0.0
                 for opt in option_keys
             ]
 

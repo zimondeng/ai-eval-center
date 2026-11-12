@@ -8,10 +8,10 @@ import httpx
 
 from app.adapters.mapper import (
     build_auth_headers,
+    dispatch_json_sut_request,
     evaluate_jsonpath_value,
-    extract_sut_response,
+    execute_json_sut_request,
     render_sut_request,
-    resolve_sut_network_policy,
 )
 from app.adapters.models import (
     ComponentRecordInput,
@@ -22,7 +22,6 @@ from app.adapters.models import (
     SutExecutionInput,
     SutExecutionResult,
 )
-from app.common.http_client import request_with_policy
 
 DEFAULT_HARNESS_REPLAY_FIELD_MAP: dict[str, str] = {
     "component": "$.sut_input_json.component",
@@ -133,62 +132,11 @@ class ComponentHarnessAdapter:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> SutExecutionResult:
         rendered = self.render_replay_request(exec_input)
-        preview = rendered.to_preview_dict()
-        network_mode, custom_proxy_url = resolve_sut_network_policy(
-            rendered.url, self.config
-        )
-
-        try:
-            dispatch = await request_with_policy(
-                rendered.method,
-                rendered.url,
-                network_mode=network_mode,
-                custom_proxy_url=custom_proxy_url,
-                timeout_seconds=float(self.config.timeout_seconds),
-                headers=rendered.headers,
-                json=rendered.body,
-                transport=transport,
-            )
-        except httpx.HTTPError as exc:
-            raise SutExecutionError(
-                f"调用组件回放网关异常: {exc}",
-                request_preview=preview,
-            ) from exc
-
-        resp = dispatch.response
-        if resp.status_code >= 400:
-            body_snippet = resp.text[:500]
-            raise SutExecutionError(
-                f"组件回放网关返回异常状态码 HTTP {resp.status_code}: {body_snippet}",
-                status_code=resp.status_code,
-                request_preview=preview,
-                upstream_body=body_snippet,
-            )
-
-        try:
-            payload = resp.json()
-        except ValueError as exc:
-            body_snippet = resp.text[:500]
-            raise SutExecutionError(
-                f"组件回放网关响应非合法 JSON: {body_snippet}",
-                status_code=resp.status_code,
-                request_preview=preview,
-                upstream_body=body_snippet,
-            ) from exc
-
-        actual_output, actual_references, actual_structured, sut_trace = extract_sut_response(
-            payload,
-            self.config.response_mapping_json,
-        )
-        return SutExecutionResult(
-            actual_output=actual_output,
-            actual_references=actual_references,
-            actual_structured=actual_structured,
-            sut_trace=sut_trace,
-            sut_latency_ms=dispatch.elapsed_ms,
-            ttft_ms=None,
-            raw_response=payload,
-            request_preview=preview,
+        return await execute_json_sut_request(
+            self.config,
+            rendered,
+            target_label="组件回放网关",
+            transport=transport,
         )
 
     async def record(
@@ -216,53 +164,17 @@ class ComponentHarnessAdapter:
             masked_headers=masked_headers,
             body=body,
         )
-        preview = rendered.to_preview_dict()
-        network_mode, custom_proxy_url = resolve_sut_network_policy(
-            record_url, self.config
+        payload, elapsed_ms, preview = await dispatch_json_sut_request(
+            self.config,
+            rendered,
+            target_label="组件快照录制端点",
+            transport=transport,
         )
-
-        try:
-            dispatch = await request_with_policy(
-                "POST",
-                record_url,
-                network_mode=network_mode,
-                custom_proxy_url=custom_proxy_url,
-                timeout_seconds=float(self.config.timeout_seconds),
-                headers=headers,
-                json=body,
-                transport=transport,
-            )
-        except httpx.HTTPError as exc:
-            raise SutExecutionError(
-                f"调用组件快照录制端点异常: {exc}",
-                request_preview=preview,
-            ) from exc
-
-        resp = dispatch.response
-        if resp.status_code >= 400:
-            body_snippet = resp.text[:500]
-            raise SutExecutionError(
-                f"组件快照录制端点返回异常状态码 HTTP {resp.status_code}: {body_snippet}",
-                status_code=resp.status_code,
-                request_preview=preview,
-                upstream_body=body_snippet,
-            )
-
-        try:
-            payload = resp.json()
-        except ValueError as exc:
-            body_snippet = resp.text[:500]
-            raise SutExecutionError(
-                f"组件快照录制端点响应非合法 JSON: {body_snippet}",
-                status_code=resp.status_code,
-                request_preview=preview,
-                upstream_body=body_snippet,
-            ) from exc
 
         if not isinstance(payload, Mapping):
             raise SutExecutionError(
                 "组件快照录制端点响应必须为 JSON 对象",
-                status_code=resp.status_code,
+                status_code=200,
                 request_preview=preview,
             )
 
@@ -276,7 +188,7 @@ class ComponentHarnessAdapter:
         if not isinstance(sut_ctx, Mapping):
             raise SutExecutionError(
                 "组件快照录制端点响应缺少合法的 sut_context 对象",
-                status_code=resp.status_code,
+                status_code=200,
                 request_preview=preview,
             )
 
@@ -299,6 +211,6 @@ class ComponentHarnessAdapter:
             sut_context=copy.deepcopy(dict(sut_ctx)),
             reference_output=reference_output,
             raw_response=copy.deepcopy(dict(payload)),
-            sut_latency_ms=dispatch.elapsed_ms,
+            sut_latency_ms=elapsed_ms,
             request_preview=preview,
         )

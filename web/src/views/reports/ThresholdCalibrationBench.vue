@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Aim, Filter, RefreshLeft } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { Aim, Filter, Lock, RefreshLeft, VideoPlay } from '@element-plus/icons-vue'
+import { formatPercent, formatReadableError } from '@/api/http'
 import { useReportStore, type EditableDimensionThreshold } from '@/stores/reportStore'
 import SplitBadge from '@/components/SplitBadge.vue'
+import type { EvalRunDetail } from '@/api/types'
 
 const props = defineProps<{
   activeDimensionCode: string
@@ -13,6 +16,7 @@ const emit = defineEmits<{
   (e: 'update:activeDimensionCode', code: string): void
   (e: 'toggle-flipped-filter', caseIds: number[]): void
   (e: 'reset-flipped-filter'): void
+  (e: 'holdout-launched', run: EvalRunDetail): void
 }>()
 
 const HOLDOUT_GUARD_COPY =
@@ -25,11 +29,9 @@ const metricMode = ref<'youden_j' | 'f1'>('youden_j')
 
 const flippedCaseIds = computed(() => reportStore.recalcResult?.flipped_case_ids ?? [])
 const flippedCount = computed(() => flippedCaseIds.value.length)
-
-function formatPercent(rate: number | null | undefined): string {
-  if (rate === null || rate === undefined || Number.isNaN(rate)) return '--'
-  return `${(rate * 100).toFixed(1)}%`
-}
+const canOperateDevSuite = computed(
+  () => reportStore.isDevSplit && Boolean(reportStore.currentRun?.suite_code),
+)
 
 function getDimensionPassRate(dimCode: string): number | null {
   if (reportStore.recalcResult?.dimension_pass_rates?.[dimCode] !== undefined) {
@@ -39,13 +41,10 @@ function getDimensionPassRate(dimCode: string): number | null {
   return summary ? summary.pass_rate : null
 }
 
-function onSuiteThresholdChange(): void {
-  reportStore.scheduleRecalculate()
-}
-
-function onSuiteInputNumberChange(val: number | undefined): void {
-  if (typeof val === 'number' && !Number.isNaN(val)) {
-    reportStore.suitePassThreshold = Math.min(1, Math.max(0, val))
+function onSuiteThresholdUpdate(val: number | number[] | null | undefined): void {
+  const num = Array.isArray(val) ? val[0] : val
+  if (typeof num === 'number' && !Number.isNaN(num)) {
+    reportStore.suitePassThreshold = Math.min(1, Math.max(0, num))
     reportStore.scheduleRecalculate()
   }
 }
@@ -55,14 +54,18 @@ function onDimControlChange(dim: EditableDimensionThreshold): void {
   reportStore.scheduleRecalculate()
 }
 
-function onDimThresholdInput(dim: EditableDimensionThreshold, val: number | undefined): void {
-  if (typeof val === 'number' && !Number.isNaN(val)) {
-    dim.threshold = Math.min(1, Math.max(0, val))
+function onDimThresholdUpdate(
+  dim: EditableDimensionThreshold,
+  val: number | number[] | null | undefined,
+): void {
+  const num = Array.isArray(val) ? val[0] : val
+  if (typeof num === 'number' && !Number.isNaN(num)) {
+    dim.threshold = Math.min(1, Math.max(0, num))
     onDimControlChange(dim)
   }
 }
 
-function onDimWeightInput(dim: EditableDimensionThreshold, val: number | undefined): void {
+function onDimWeightInput(dim: EditableDimensionThreshold, val: number | null | undefined): void {
   if (typeof val === 'number' && !Number.isNaN(val)) {
     dim.weight = Math.max(0, val)
     onDimControlChange(dim)
@@ -76,7 +79,36 @@ async function onResetClick(): Promise<void> {
 
 async function onRecommendClick(): Promise<void> {
   if (!reportStore.isDevSplit) return
-  await reportStore.recommendOptimalThresholds(metricMode.value)
+  try {
+    await reportStore.recommendOptimalThresholds(metricMode.value)
+  } catch (err) {
+    ElMessage.error(formatReadableError(err))
+  }
+}
+
+async function onLockSuiteClick(): Promise<void> {
+  if (!canOperateDevSuite.value) return
+  try {
+    const updated = await reportStore.lockThresholdsToSuite()
+    if (updated) {
+      ElMessage.success(`已将校准门禁阈值锁定至套件 ${updated.suite_code}`)
+    }
+  } catch (err) {
+    ElMessage.error(formatReadableError(err))
+  }
+}
+
+async function onLaunchHoldoutClick(): Promise<void> {
+  if (!canOperateDevSuite.value) return
+  try {
+    const created = await reportStore.launchHoldoutVerificationRun()
+    if (created) {
+      ElMessage.success(`已发起 HOLDOUT 留出集验真批次 ${created.run_no}`)
+      emit('holdout-launched', created)
+    }
+  } catch (err) {
+    ElMessage.error(formatReadableError(err))
+  }
 }
 
 function onToggleFlipped(): void {
@@ -127,6 +159,41 @@ function onToggleFlipped(): void {
           <span>重置默认阈值</span>
         </el-button>
 
+        <el-tooltip
+          :content="canOperateDevSuite ? '将当前校准阈值与权重写回评测套件配置' : HOLDOUT_GUARD_COPY"
+          placement="top"
+        >
+          <span class="ev-calib-bench__guard-wrap">
+            <el-button
+              data-testid="btn-lock-suite-thresholds"
+              size="small"
+              :disabled="!canOperateDevSuite"
+              :loading="reportStore.lockingSuite"
+              @click="onLockSuiteClick"
+            >
+              <el-icon><Lock /></el-icon>
+              <span>锁定阈值至套件</span>
+            </el-button>
+          </span>
+        </el-tooltip>
+
+        <el-tooltip
+          v-if="reportStore.isDevSplit"
+          content="基于已锁定门禁配置直接发起 HOLDOUT 留出集最终验真批次"
+          placement="top"
+        >
+          <el-button
+            data-testid="btn-launch-holdout-run"
+            size="small"
+            :disabled="!canOperateDevSuite"
+            :loading="reportStore.launchingHoldout"
+            @click="onLaunchHoldoutClick"
+          >
+            <el-icon><VideoPlay /></el-icon>
+            <span>一键发起 HOLDOUT 验真批次</span>
+          </el-button>
+        </el-tooltip>
+
         <el-select
           v-if="reportStore.isDevSplit"
           v-model="metricMode"
@@ -174,19 +241,20 @@ function onToggleFlipped(): void {
         </div>
 
         <div class="ev-calib-row__controls">
-          <input
-            v-model.number="reportStore.suitePassThreshold"
-            data-testid="suite-threshold-native-range"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            class="ev-range-input"
+          <el-slider
+            :model-value="reportStore.suitePassThreshold"
+            data-testid="suite-threshold-slider"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            :show-tooltip="false"
+            class="ev-slider-input"
             aria-label="套件综合门禁阈值滑块"
-            @input="onSuiteThresholdChange"
+            @update:model-value="onSuiteThresholdUpdate"
           />
           <el-input-number
             :model-value="reportStore.suitePassThreshold"
+            data-testid="suite-threshold-input"
             size="small"
             :min="0"
             :max="1"
@@ -195,7 +263,7 @@ function onToggleFlipped(): void {
             controls-position="right"
             class="ev-calib-row__num ev-mono"
             aria-label="套件综合门禁阈值数值"
-            @change="onSuiteInputNumberChange"
+            @change="onSuiteThresholdUpdate"
           />
         </div>
 
@@ -250,16 +318,16 @@ function onToggleFlipped(): void {
         </div>
 
         <div class="ev-calib-row__controls" @click.stop>
-          <input
-            v-model.number="dim.threshold"
-            :data-testid="`dim-threshold-range-${dim.dimension_code}`"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            class="ev-range-input"
+          <el-slider
+            :model-value="dim.threshold"
+            :data-testid="`dim-threshold-slider-${dim.dimension_code}`"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            :show-tooltip="false"
+            class="ev-slider-input"
             :aria-label="`${dim.dimension_name}阈值滑块`"
-            @input="onDimControlChange(dim)"
+            @update:model-value="(v: number | number[]) => onDimThresholdUpdate(dim, v)"
           />
           <el-input-number
             :model-value="dim.threshold"
@@ -271,7 +339,7 @@ function onToggleFlipped(): void {
             controls-position="right"
             class="ev-calib-row__num ev-mono"
             :aria-label="`${dim.dimension_name}阈值数值`"
-            @change="(v: number | undefined) => onDimThresholdInput(dim, v)"
+            @change="(v: number | undefined) => onDimThresholdUpdate(dim, v)"
           />
         </div>
 
@@ -415,14 +483,13 @@ function onToggleFlipped(): void {
 .ev-calib-row__controls {
   display: flex;
   align-items: center;
-  gap: var(--ev-space-sm);
+  gap: var(--ev-space-md);
 }
 
-.ev-range-input {
+.ev-slider-input {
   flex: 1;
   min-width: 120px;
-  accent-color: var(--ev-color-primary);
-  cursor: pointer;
+  margin-right: 4px;
 }
 
 .ev-calib-row__num {

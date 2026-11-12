@@ -108,6 +108,7 @@ onBeforeUnmount(() => {
             type="button"
             class="ev-nav-item"
             :class="{ 'is-active': isNavActive(item) }"
+            :aria-label="item.label"
             @click="handleNavigate(item.path)"
           >
             <el-icon class="ev-nav-item__icon">
@@ -138,6 +139,7 @@ onBeforeUnmount(() => {
           type="button"
           class="ev-nav-item"
           :class="{ 'is-active': isNavActive(item) }"
+          :aria-label="item.label"
           @click="handleNavigate(item.path)"
         >
           <el-icon class="ev-nav-item__icon">

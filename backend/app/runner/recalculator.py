@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -20,6 +21,16 @@ from app.runner.schemas import (
 _THRESHOLD_GRID: tuple[float, ...] = tuple(round(0.10 + 0.01 * i, 2) for i in range(86))
 
 
+@dataclass(slots=True)
+class _DimensionCaseScore:
+    run_case_id: int
+    raw_score: float
+    applied_threshold: float
+    applied_weight: float
+    is_blocker: bool
+    evaluator_kind: str
+
+
 def _normalize_overrides_dict(
     raw_overrides: Mapping[str, Any] | None,
 ) -> dict[str, dict[str, Any]]:
@@ -35,6 +46,51 @@ def _normalize_overrides_dict(
             continue
         out[str(dim_code)] = dumped
     return out
+
+
+def _load_ledgers_by_run_case(
+    db: Session,
+    *,
+    run_id: int,
+    include_raw_answers: bool = False,
+) -> dict[int, list[dict[str, Any]]]:
+    columns: list[Any] = [
+        ProbabilityLedger.run_case_id,
+        ProbabilityLedger.dimension_code,
+        ProbabilityLedger.evaluator_kind,
+        ProbabilityLedger.raw_dimension_score,
+        ProbabilityLedger.applied_threshold,
+        ProbabilityLedger.applied_weight,
+        ProbabilityLedger.is_blocker,
+        ProbabilityLedger.min_question_confidence,
+    ]
+    if include_raw_answers:
+        columns.append(ProbabilityLedger.raw_answers_json)
+
+    rows = db.execute(
+        select(*columns)
+        .where(
+            ProbabilityLedger.run_id == run_id,
+            ProbabilityLedger.is_deleted == 0,
+        )
+        .order_by(ProbabilityLedger.id.asc())
+    ).all()
+
+    ledgers_by_rc: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        item: dict[str, Any] = {
+            "dimension_code": row[1],
+            "evaluator_kind": row[2],
+            "raw_dimension_score": row[3],
+            "applied_threshold": row[4],
+            "applied_weight": row[5],
+            "is_blocker": bool(row[6]),
+            "min_question_confidence": row[7],
+        }
+        if include_raw_answers:
+            item["raw_answers_json"] = row[8]
+        ledgers_by_rc.setdefault(int(row[0]), []).append(item)
+    return ledgers_by_rc
 
 
 def recalculate_run(
@@ -66,7 +122,6 @@ def recalculate_run(
     overrides_map = _normalize_overrides_dict(req.dimension_overrides)
     needs_raw_answers = any("strict_mode" in ov for ov in overrides_map.values())
 
-    # Bulk query 1: lightweight tuple projection of SUCCESS EvalRunCase rows
     case_rows = db.execute(
         select(
             EvalRunCase.id,
@@ -95,76 +150,11 @@ def recalculate_run(
             "compute_elapsed_ms": elapsed_empty,
         }
 
-    # Bulk query 2: lightweight tuple projection of ProbabilityLedger rows (no N+1)
-    if needs_raw_answers:
-        ledger_tuples = db.execute(
-            select(
-                ProbabilityLedger.run_case_id,
-                ProbabilityLedger.dimension_code,
-                ProbabilityLedger.raw_dimension_score,
-                ProbabilityLedger.applied_threshold,
-                ProbabilityLedger.applied_weight,
-                ProbabilityLedger.is_blocker,
-                ProbabilityLedger.min_question_confidence,
-                ProbabilityLedger.raw_answers_json,
-            )
-            .where(
-                ProbabilityLedger.run_id == run.id,
-                ProbabilityLedger.is_deleted == 0,
-            )
-            .order_by(ProbabilityLedger.id.asc())
-        ).all()
-        ledgers_by_rc: dict[int, list[dict[str, Any]]] = {}
-        for (
-            rc_id,
-            d_code,
-            raw_s,
-            app_t,
-            app_w,
-            blocker,
-            min_c,
-            raw_ans,
-        ) in ledger_tuples:
-            ledgers_by_rc.setdefault(int(rc_id), []).append(
-                {
-                    "dimension_code": d_code,
-                    "raw_dimension_score": raw_s,
-                    "applied_threshold": app_t,
-                    "applied_weight": app_w,
-                    "is_blocker": bool(blocker),
-                    "min_question_confidence": min_c,
-                    "raw_answers_json": raw_ans,
-                }
-            )
-    else:
-        ledger_tuples_fast = db.execute(
-            select(
-                ProbabilityLedger.run_case_id,
-                ProbabilityLedger.dimension_code,
-                ProbabilityLedger.raw_dimension_score,
-                ProbabilityLedger.applied_threshold,
-                ProbabilityLedger.applied_weight,
-                ProbabilityLedger.is_blocker,
-                ProbabilityLedger.min_question_confidence,
-            )
-            .where(
-                ProbabilityLedger.run_id == run.id,
-                ProbabilityLedger.is_deleted == 0,
-            )
-            .order_by(ProbabilityLedger.id.asc())
-        ).all()
-        ledgers_by_rc = {}
-        for rc_id, d_code, raw_s, app_t, app_w, blocker, min_c in ledger_tuples_fast:
-            ledgers_by_rc.setdefault(int(rc_id), []).append(
-                {
-                    "dimension_code": d_code,
-                    "raw_dimension_score": raw_s,
-                    "applied_threshold": app_t,
-                    "applied_weight": app_w,
-                    "is_blocker": bool(blocker),
-                    "min_question_confidence": min_c,
-                }
-            )
+    ledgers_by_rc = _load_ledgers_by_run_case(
+        db,
+        run_id=run.id,
+        include_raw_answers=needs_raw_answers,
+    )
 
     passed_cases = 0
     failed_cases = 0
@@ -231,6 +221,12 @@ def _coerce_binary_label(val: Any) -> bool | None:
         return val
     if isinstance(val, int) and val in (0, 1):
         return bool(val)
+    if isinstance(val, str):
+        norm = val.strip().upper()
+        if norm in {"1", "TRUE", "PASS", "PASSED", "POSITIVE", "YES"}:
+            return True
+        if norm in {"0", "FALSE", "FAIL", "FAILED", "NEGATIVE", "NO"}:
+            return False
     return None
 
 
@@ -239,6 +235,8 @@ def _extract_case_label(
     case_id: int,
     case_code: str,
     expected_structured: Any,
+    expected_outcome: str | None = None,
+    tags_json: Any = None,
     explicit_labels: Mapping[str, Any] | None,
 ) -> bool | None:
     if explicit_labels:
@@ -248,11 +246,30 @@ def _extract_case_label(
                 if coerced is not None:
                     return coerced
     if isinstance(expected_structured, Mapping):
-        for key in ("expected_pass", "human_pass", "ground_truth_pass", "usable"):
+        for key in (
+            "expected_pass",
+            "human_pass",
+            "ground_truth_pass",
+            "usable",
+            "is_positive",
+            "label",
+            "pass",
+        ):
             if key in expected_structured:
                 coerced = _coerce_binary_label(expected_structured[key])
                 if coerced is not None:
                     return coerced
+    if expected_outcome:
+        coerced_out = _coerce_binary_label(expected_outcome)
+        if coerced_out is not None:
+            return coerced_out
+    if isinstance(tags_json, Sequence) and not isinstance(tags_json, (str, bytes)):
+        for tag in tags_json:
+            norm_tag = str(tag).strip().upper()
+            if norm_tag in {"GT:PASS", "HUMAN_PASS", "LABEL:POSITIVE"}:
+                return True
+            if norm_tag in {"GT:FAIL", "HUMAN_FAIL", "LABEL:NEGATIVE"}:
+                return False
     return None
 
 
@@ -304,41 +321,6 @@ def _grid_search_supervised(
     return mid[0], round(mid[1], 4), round(mid[2], 4)
 
 
-def _grid_search_distribution_fallback(scores: Sequence[float], default_t: float) -> float:
-    if not scores:
-        return round(min(0.95, max(0.10, default_t)), 2)
-    s_sorted = sorted(scores)
-    spread = s_sorted[-1] - s_sorted[0]
-    if spread < 0.12:
-        p25_idx = max(0, int(len(s_sorted) * 0.25))
-        cand = min(0.90, max(0.50, round(s_sorted[p25_idx], 2)))
-        return cand
-
-    # Otsu between-class variance maximization across grid
-    n = float(len(s_sorted))
-    best_var = -1.0
-    best_ts: list[float] = []
-    for t in _THRESHOLD_GRID:
-        low = [x for x in s_sorted if x < t]
-        high = [x for x in s_sorted if x >= t]
-        if not low or not high:
-            continue
-        w0 = len(low) / n
-        w1 = len(high) / n
-        mu0 = sum(low) / len(low)
-        mu1 = sum(high) / len(high)
-        between_var = w0 * w1 * ((mu1 - mu0) ** 2)
-        if between_var > best_var + 1e-9:
-            best_var = between_var
-            best_ts = [t]
-        elif abs(between_var - best_var) <= 1e-9:
-            best_ts.append(t)
-
-    if not best_ts:
-        return round(min(0.95, max(0.10, default_t)), 2)
-    return best_ts[len(best_ts) // 2]
-
-
 def recommend_run_thresholds(
     db: Session,
     run_no: str,
@@ -365,6 +347,8 @@ def recommend_run_thresholds(
             EvalCase.case_code,
             EvalCase.dataset_split,
             EvalCase.expected_structured_json,
+            EvalCase.expected_outcome,
+            EvalCase.tags_json,
         )
         .join(EvalCase, EvalRunCase.case_id == EvalCase.id)
         .where(
@@ -384,10 +368,11 @@ def recommend_run_thresholds(
 
     success_rows = [r for r in joined_cases if r.exec_status == "SUCCESS"]
     if not success_rows:
-        raise AppError("当前 DEV 批次暂无成功完成的评测样本，无法执行自动阈值寻优", status_code=400, code=400)
-
-    suite = db.scalar(select(Suite).where(Suite.id == run.suite_id))
-    default_suite_t = float(suite.suite_pass_threshold) if suite is not None else 0.75
+        raise AppError(
+            "当前 DEV 批次暂无成功完成的评测样本，无法执行自动阈值寻优",
+            status_code=400,
+            code=400,
+        )
 
     labels_by_rc: dict[int, bool] = {}
     for r in success_rows:
@@ -395,81 +380,77 @@ def recommend_run_thresholds(
             case_id=int(r.case_id),
             case_code=str(r.case_code),
             expected_structured=r.expected_structured_json,
+            expected_outcome=r.expected_outcome,
+            tags_json=r.tags_json,
             explicit_labels=req.labels,
         )
         if lbl is not None:
             labels_by_rc[int(r.id)] = lbl
 
-    has_both_classes = (
-        len(labels_by_rc) >= 2
-        and any(v is True for v in labels_by_rc.values())
-        and any(v is False for v in labels_by_rc.values())
-    )
-    label_source = "ground_truth" if has_both_classes else "distribution_fallback"
+    pos_count = sum(1 for v in labels_by_rc.values() if v is True)
+    neg_count = sum(1 for v in labels_by_rc.values() if v is False)
+    if pos_count < 1 or neg_count < 1:
+        raise AppError(
+            "监督式阈值寻优要求 DEV 批次至少包含 1 条正例与 1 条负例 Ground Truth 标注"
+            "（请在真值校准台的 expected_structured_json 中标注 human_pass / expected_pass，"
+            "或在请求 labels 中传入正负例标签后再试）。",
+            status_code=400,
+            code=400,
+        )
 
-    ledger_rows = db.execute(
-        select(
-            ProbabilityLedger.run_case_id,
-            ProbabilityLedger.dimension_code,
-            ProbabilityLedger.evaluator_kind,
-            ProbabilityLedger.raw_dimension_score,
-            ProbabilityLedger.applied_threshold,
-            ProbabilityLedger.applied_weight,
-            ProbabilityLedger.is_blocker,
-        )
-        .where(
-            ProbabilityLedger.run_id == run.id,
-            ProbabilityLedger.is_deleted == 0,
-        )
-        .order_by(ProbabilityLedger.id.asc())
-    ).all()
+    ledgers_by_rc = _load_ledgers_by_run_case(db, run_id=run.id, include_raw_answers=False)
 
-    by_dim: dict[str, list[tuple[int, float, float, float, bool, str]]] = {}
-    for rc_id, d_code, ev_kind, raw_s, app_t, app_w, blocker in ledger_rows:
-        if raw_s is None:
-            continue
-        by_dim.setdefault(str(d_code), []).append(
-            (int(rc_id), float(raw_s), float(app_t), float(app_w), bool(blocker), str(ev_kind))
-        )
+    by_dim: dict[str, list[_DimensionCaseScore]] = {}
+    for rc_id, rc_ledgers in ledgers_by_rc.items():
+        for entry in rc_ledgers:
+            raw_s = entry["raw_dimension_score"]
+            if raw_s is None:
+                continue
+            d_code = str(entry["dimension_code"])
+            by_dim.setdefault(d_code, []).append(
+                _DimensionCaseScore(
+                    run_case_id=int(rc_id),
+                    raw_score=float(raw_s),
+                    applied_threshold=float(entry["applied_threshold"]),
+                    applied_weight=float(entry["applied_weight"]),
+                    is_blocker=bool(entry["is_blocker"]),
+                    evaluator_kind=str(entry["evaluator_kind"]),
+                )
+            )
 
     recommended_dim_overrides: dict[str, dict[str, Any]] = {}
     recalc_ov_models: dict[str, DimensionOverrideInput] = {}
 
     for d_code, items in by_dim.items():
-        orig_t = items[0][2]
-        orig_w = items[0][3]
-        orig_blocker = items[0][4]
-        ev_kind = items[0][5]
-        all_scores = [it[1] for it in items]
+        first = items[0]
+        orig_t = first.applied_threshold
+        orig_w = first.applied_weight
+        orig_blocker = first.is_blocker
+        ev_kind = first.evaluator_kind
+        all_scores = [it.raw_score for it in items]
 
-        # Keep binary exact-match deterministic dimensions (scores strictly in {0.0, 1.0}) at their exact threshold
         is_binary_det = (
             ev_kind == "DETERMINISTIC"
             and orig_t >= 0.99
             and all(s <= 1e-6 or s >= 1.0 - 1e-6 for s in all_scores)
         )
-        if is_binary_det:
+        labeled_pairs = [
+            (it.raw_score, labels_by_rc[it.run_case_id])
+            for it in items
+            if it.run_case_id in labels_by_rc
+        ]
+        has_dim_both_classes = (
+            len(labeled_pairs) >= 2
+            and any(lbl for _, lbl in labeled_pairs)
+            and any(not lbl for _, lbl in labeled_pairs)
+        )
+
+        if is_binary_det or not has_dim_both_classes:
             rec_t = orig_t
             dim_yj: float | None = None
             dim_f1: float | None = None
-        elif has_both_classes:
-            labeled_pairs = [
-                (it[1], labels_by_rc[it[0]]) for it in items if it[0] in labels_by_rc
-            ]
-            if (
-                len(labeled_pairs) >= 2
-                and any(lbl for _, lbl in labeled_pairs)
-                and any(not lbl for _, lbl in labeled_pairs)
-            ):
-                rec_t, dim_yj, dim_f1 = _grid_search_supervised(labeled_pairs, req.metric)
-            else:
-                rec_t = _grid_search_distribution_fallback(all_scores, orig_t)
-                dim_yj = None
-                dim_f1 = None
         else:
-            rec_t = _grid_search_distribution_fallback(all_scores, orig_t)
-            dim_yj = None
-            dim_f1 = None
+            rec_t, dim_yj, dim_f1 = _grid_search_supervised(labeled_pairs, req.metric)
 
         recommended_dim_overrides[d_code] = {
             "threshold": rec_t,
@@ -484,24 +465,22 @@ def recommend_run_thresholds(
             is_blocker=orig_blocker,
         )
 
-    overall_scores = [
-        (int(r.id), float(r.overall_score))
+    suite_pairs = [
+        (float(r.overall_score), labels_by_rc[int(r.id)])
         for r in success_rows
-        if r.overall_score is not None
+        if r.overall_score is not None and int(r.id) in labels_by_rc
     ]
-    if has_both_classes:
-        suite_pairs = [
-            (score, labels_by_rc[rc_id])
-            for rc_id, score in overall_scores
-            if rc_id in labels_by_rc
-        ]
-        rec_suite_t, best_yj, best_f1 = _grid_search_supervised(suite_pairs, req.metric)
-    else:
-        rec_suite_t = _grid_search_distribution_fallback(
-            [s for _, s in overall_scores], default_suite_t
+    if (
+        len(suite_pairs) < 2
+        or not any(lbl for _, lbl in suite_pairs)
+        or not any(not lbl for _, lbl in suite_pairs)
+    ):
+        raise AppError(
+            "当前已完成评分的 DEV 样本中缺少成对的正负例 Ground Truth 标注，无法执行监督式阈值寻优。",
+            status_code=400,
+            code=400,
         )
-        best_yj = None
-        best_f1 = None
+    rec_suite_t, best_yj, best_f1 = _grid_search_supervised(suite_pairs, req.metric)
 
     preview = recalculate_run(
         db,
@@ -516,7 +495,7 @@ def recommend_run_thresholds(
         "run_no": run.run_no,
         "dataset_split_filter": run.dataset_split_filter,
         "metric": req.metric,
-        "label_source": label_source,
+        "label_source": "ground_truth",
         "labeled_cases": len(labels_by_rc),
         "suite_pass_threshold": rec_suite_t,
         "dimension_overrides": recommended_dim_overrides,

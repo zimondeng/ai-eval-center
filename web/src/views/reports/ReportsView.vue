@@ -3,14 +3,15 @@ import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Download, Refresh, Search, WarningFilled } from '@element-plus/icons-vue'
 import { runsApi } from '@/api/endpoints'
+import { formatPercent, formatScore } from '@/api/http'
 import { useReportStore } from '@/stores/reportStore'
 import SplitBadge from '@/components/SplitBadge.vue'
-import DualStatusBadge from '@/components/DualStatusBadge.vue'
+import DualStatusBadge, { REGRESSION_TAG_OPTIONS } from '@/components/DualStatusBadge.vue'
 import EmptyStateBox from '@/components/EmptyStateBox.vue'
 import ThresholdCalibrationBench from './ThresholdCalibrationBench.vue'
 import ReportChartsPanel from './ReportChartsPanel.vue'
 import ProbabilityLedgerDrawer from './ProbabilityLedgerDrawer.vue'
-import type { EvalRunCaseItem, EvalRunRecord, SemanticRegressionTag } from '@/api/types'
+import type { EvalRunCaseItem, EvalRunDetail, EvalRunRecord, SemanticRegressionTag } from '@/api/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -115,16 +116,6 @@ const activeDrawerIndex = computed(() => {
   return reportStore.runCases.findIndex((c) => c.id === target.id)
 })
 
-function formatPercent(val: number | null | undefined): string {
-  if (val === null || val === undefined || Number.isNaN(val)) return '--'
-  return `${(val * 100).toFixed(1)}%`
-}
-
-function formatScore(val: number | null | undefined, digits = 3): string {
-  if (val === null || val === undefined || Number.isNaN(val)) return '--'
-  return val.toFixed(digits)
-}
-
 async function fetchCases(): Promise<void> {
   if (!selectedRunNo.value) return
   const passedParam =
@@ -175,6 +166,22 @@ async function onRunSwitch(nextRunNo: string): Promise<void> {
 async function onBaselineSwitch(nextBaseNo: string): Promise<void> {
   if (!selectedRunNo.value) return
   await reportStore.loadRunReport(selectedRunNo.value, nextBaseNo || null)
+}
+
+async function onHoldoutRunLaunched(created: EvalRunDetail): Promise<void> {
+  try {
+    const listRes = await runsApi.list({ page: 1, page_size: 50 })
+    runOptions.value = listRes.items
+  } catch {
+    // keep existing runOptions if refresh fails
+  }
+  router.replace({ name: 'report-detail', params: { runNo: created.run_no } })
+  await loadSelectedRun(created.run_no)
+}
+
+function onPageSizeChange(): void {
+  currentPage.value = 1
+  void fetchCases()
 }
 
 function onToggleFlippedFilter(caseIds: number[]): void {
@@ -304,14 +311,16 @@ onMounted(() => {
           <span>导出报告 JSON</span>
         </el-button>
 
-        <el-button
-          class="ev-icon-btn"
-          aria-label="刷新当前批次报告"
-          :disabled="!selectedRunNo"
-          @click="loadSelectedRun(selectedRunNo, selectedBaselineNo || null)"
-        >
-          <el-icon><Refresh /></el-icon>
-        </el-button>
+        <el-tooltip content="刷新当前批次报告" placement="bottom">
+          <el-button
+            class="ev-icon-btn"
+            aria-label="刷新当前批次报告"
+            :disabled="!selectedRunNo"
+            @click="loadSelectedRun(selectedRunNo, selectedBaselineNo || null)"
+          >
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+        </el-tooltip>
       </div>
     </header>
 
@@ -320,8 +329,13 @@ onMounted(() => {
       <span>{{ reportStore.errorMessage }}</span>
     </div>
 
+    <!-- Loading skeleton (DESIGN.md §9) -->
+    <section v-if="reportStore.loadingReport" class="ev-surface">
+      <el-skeleton data-testid="report-skeleton" :rows="8" animated />
+    </section>
+
     <!-- Empty state if no run exists at all -->
-    <section v-if="!currentRun && !reportStore.loadingReport" class="ev-surface">
+    <section v-else-if="!currentRun" class="ev-surface">
       <EmptyStateBox
         entity-name="实验批次报告"
         description="暂无可展示的实验批次报告。请先前往「实验批次」模块发起一次评测运行。"
@@ -434,8 +448,20 @@ onMounted(() => {
           </div>
           <span class="ev-kpi-card__sub ev-mono">
             请求 {{ currentRun.total_decision_calls }} 次（原
-            {{ currentRun.unbatched_question_count }} 题）·
-            {{ currentRun.total_input_tokens }} tokens
+            {{ currentRun.unbatched_question_count }} 题）
+          </span>
+        </div>
+
+        <div data-testid="kpi-eval-cost" class="ev-surface ev-kpi-card">
+          <span class="ev-kpi-card__label">估算成本</span>
+          <div class="ev-kpi-card__row">
+            <span class="ev-kpi-card__val ev-mono">
+              ${{ Number(currentRun.total_eval_cost ?? 0).toFixed(4) }}
+              <small class="ev-kpi-card__unit">USD</small>
+            </span>
+          </div>
+          <span class="ev-kpi-card__sub ev-mono">
+            输入 {{ Number(currentRun.total_input_tokens ?? 0).toLocaleString('en-US') }} Tokens
           </span>
         </div>
       </section>
@@ -446,6 +472,7 @@ onMounted(() => {
         :filtering-flipped="flippedIdsFilter.length > 0"
         @toggle-flipped-filter="onToggleFlippedFilter"
         @reset-flipped-filter="onResetFlippedFilter"
+        @holdout-launched="onHoldoutRunLaunched"
       />
 
       <!-- ECharts Panel -->
@@ -513,10 +540,12 @@ onMounted(() => {
                 }
               "
             >
-              <el-option label="SAME · 语义等价" value="SAME" />
-              <el-option label="SPECIFICITY_DIFFERS · 详略差异" value="SPECIFICITY_DIFFERS" />
-              <el-option label="ACTION_DIFFERS · 动作分歧" value="ACTION_DIFFERS" />
-              <el-option label="FACT_DIFFERS · 事实冲突" value="FACT_DIFFERS" />
+              <el-option
+                v-for="regOpt in REGRESSION_TAG_OPTIONS"
+                :key="regOpt.tag"
+                :label="regOpt.fullText"
+                :value="regOpt.tag"
+              />
             </el-select>
 
             <span v-if="flippedIdsFilter.length > 0" class="ev-flipped-chip ev-mono">
@@ -556,21 +585,28 @@ onMounted(() => {
           </div>
         </div>
 
+        <el-skeleton
+          v-if="reportStore.loadingCases && reportStore.runCases.length === 0"
+          data-testid="cases-skeleton"
+          :rows="6"
+          animated
+        />
+
         <EmptyStateBox
-          v-if="reportStore.runCases.length === 0 && !reportStore.loadingCases"
+          v-else-if="reportStore.runCases.length === 0 && !reportStore.loadingCases"
           :filtered="hasActiveCaseFilter"
           entity-name="用例评测记录"
           @reset="resetAllCaseFilters"
         />
 
-        <el-table
-          v-else
-          :data="reportStore.runCases"
-          row-key="id"
-          size="small"
-          class="ev-cases-table"
-          @row-click="openLedgerForRow"
-        >
+        <template v-else>
+          <el-table
+            :data="reportStore.runCases"
+            row-key="id"
+            size="small"
+            class="ev-cases-table"
+            @row-click="openLedgerForRow"
+          >
           <el-table-column label="用例编号 / 分集" min-width="180">
             <template #default="{ row }">
               <div class="ev-case-id-cell">
@@ -610,12 +646,13 @@ onMounted(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="语义回归" width="168">
+          <el-table-column label="语义回归" width="225">
             <template #default="{ row }">
-              <span v-if="row.regression_tag" class="ev-mono ev-reg-cell-tag">
-                {{ row.regression_tag }}
-              </span>
-              <span v-else class="ev-text-muted">--</span>
+              <DualStatusBadge
+                v-if="row.regression_tag"
+                :regression-tag="row.regression_tag"
+              />
+              <span v-else class="ev-text-muted">—</span>
             </template>
           </el-table-column>
 
@@ -634,7 +671,23 @@ onMounted(() => {
               </el-button>
             </template>
           </el-table-column>
-        </el-table>
+          </el-table>
+
+          <div
+            data-testid="report-cases-pagination"
+            class="ev-pagination-row"
+          >
+            <el-pagination
+              v-model:current-page="currentPage"
+              v-model:page-size="pageSize"
+              :page-sizes="[50, 100, 200]"
+              layout="total, sizes, prev, pager, next"
+              :total="reportStore.runCasesTotal"
+              @current-change="fetchCases"
+              @size-change="onPageSizeChange"
+            />
+          </div>
+        </template>
       </section>
 
       <!-- Right-Side 680px Probability Ledger Drawer -->
@@ -741,7 +794,7 @@ onMounted(() => {
 
 .ev-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--ev-space-lg);
 }
 
@@ -837,16 +890,14 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.ev-reg-cell-tag {
-  font-size: var(--ev-fs-label);
-  padding: 1px 6px;
-  border-radius: var(--ev-radius-sm);
-  background-color: var(--ev-bg-panel);
-  color: var(--ev-text-secondary);
-}
-
 .ev-text-muted {
   color: var(--ev-text-tertiary);
+}
+
+.ev-pagination-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
 }
 
 @media (max-width: 1439px) {

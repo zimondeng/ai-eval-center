@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { ArrowLeft, Check, Refresh } from '@element-plus/icons-vue'
 import { datasetsApi } from '@/api/endpoints'
-import { formatReadableError, formatScore } from '@/api/http'
+import { formatReadableError, formatScore, validateOptionalJsonObject } from '@/api/http'
 import type { DatasetSplit, EvalCaseRecord, ReviewStatus } from '@/api/types'
 import DualStatusBadge from '@/components/DualStatusBadge.vue'
 import EmptyStateBox from '@/components/EmptyStateBox.vue'
@@ -33,7 +33,10 @@ const loading = ref(false)
 const saving = ref(false)
 const cases = ref<EvalCaseRecord[]>([])
 const total = ref(0)
+const page = ref(1)
+const pageSize = ref(100)
 const selectedIndex = ref(0)
+const curationFormRef = ref<FormInstance>()
 
 const editForm = reactive({
   expected_output: '',
@@ -43,6 +46,14 @@ const editForm = reactive({
   pii_masked: 0,
   review_note: '',
 })
+
+const curationRules: FormRules<typeof editForm> = {
+  expected_structured_text: [
+    { validator: validateOptionalJsonObject, trigger: ['blur', 'change'] },
+  ],
+  dataset_split: [{ required: true, message: '请选择固定分集归属', trigger: 'change' }],
+  difficulty: [{ required: true, message: '请选择样本难度分级', trigger: 'change' }],
+}
 
 const splitOptions = [
   { label: 'ALL 全部', value: 'ALL' },
@@ -81,6 +92,7 @@ function syncEditorFromCase(row: EvalCaseRecord | null): void {
 
 watch(activeCase, (next) => {
   syncEditorFromCase(next)
+  curationFormRef.value?.clearValidate()
 })
 
 async function fetchCases(): Promise<void> {
@@ -91,8 +103,8 @@ async function fetchCases(): Promise<void> {
       review_status: statusFilter.value || undefined,
       q: keyword.value.trim() || undefined,
       sort: sortOrder.value,
-      page: 1,
-      page_size: 100,
+      page: page.value,
+      page_size: pageSize.value,
     })
     cases.value = res.items
     total.value = res.total
@@ -103,6 +115,16 @@ async function fetchCases(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+function onFilterChange(): void {
+  page.value = 1
+  void fetchCases()
+}
+
+function onPageSizeChange(): void {
+  page.value = 1
+  void fetchCases()
 }
 
 function selectCaseIndex(idx: number): void {
@@ -117,14 +139,13 @@ async function submitCuration(targetStatus: ReviewStatus): Promise<void> {
     return
   }
 
+  if (!curationFormRef.value) return
+  const valid = await curationFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
   let structuredObj: Record<string, unknown> | null = null
   if (editForm.expected_structured_text.trim()) {
-    try {
-      structuredObj = JSON.parse(editForm.expected_structured_text) as Record<string, unknown>
-    } catch {
-      ElMessage.error('结构化期望目标 JSON 格式不合法')
-      return
-    }
+    structuredObj = JSON.parse(editForm.expected_structured_text) as Record<string, unknown>
   }
 
   saving.value = true
@@ -160,6 +181,7 @@ function resetFilters(): void {
   statusFilter.value = ''
   keyword.value = ''
   sortOrder.value = 'uncertainty_desc'
+  page.value = 1
   void fetchCases()
 }
 
@@ -189,20 +211,20 @@ onMounted(() => {
         <el-segmented
           v-model="splitFilter"
           :options="splitOptions"
-          @change="fetchCases"
+          @change="onFilterChange"
         />
         <el-select
           v-model="statusFilter"
           placeholder="全部审核状态"
           clearable
           style="width: 165px"
-          @change="fetchCases"
+          @change="onFilterChange"
         >
           <el-option label="待审核 (PENDING_REVIEW)" value="PENDING_REVIEW" />
           <el-option label="已审核生效 (APPROVED)" value="APPROVED" />
           <el-option label="草稿 (DRAFT)" value="DRAFT" />
         </el-select>
-        <el-select v-model="sortOrder" style="width: 190px" @change="fetchCases">
+        <el-select v-model="sortOrder" style="width: 190px" @change="onFilterChange">
           <el-option label="不确定度降序 (优先校准)" value="uncertainty_desc" />
           <el-option label="用例顺序 (ID 升序)" value="id_asc" />
         </el-select>
@@ -211,9 +233,10 @@ onMounted(() => {
           placeholder="搜索用例编码或提问文本"
           clearable
           style="width: 210px"
-          @keyup.enter="fetchCases"
+          @keyup.enter="onFilterChange"
+          @clear="onFilterChange"
         />
-        <el-button @click="fetchCases">查询</el-button>
+        <el-button @click="onFilterChange">查询</el-button>
         <el-button @click="resetFilters">重置</el-button>
       </div>
       <div class="ev-filter-bar__right">
@@ -300,6 +323,18 @@ onMounted(() => {
             </ul>
           </template>
         </template>
+
+        <div data-testid="curation-pagination" class="ev-pagination-row">
+          <el-pagination
+            v-model:current-page="page"
+            v-model:page-size="pageSize"
+            :page-sizes="[50, 100, 200]"
+            layout="total, sizes, prev, pager, next"
+            :total="total"
+            @current-change="fetchCases"
+            @size-change="onPageSizeChange"
+          />
+        </div>
       </section>
 
       <!-- Right Column: Ground Truth Revision & PII Guardrail Approval -->
@@ -314,8 +349,14 @@ onMounted(() => {
             />
           </div>
 
-          <el-form label-position="top" class="ev-curation-form">
-            <el-form-item label="标准答案文本 (expected_output)">
+          <el-form
+            ref="curationFormRef"
+            :model="editForm"
+            :rules="curationRules"
+            label-position="top"
+            class="ev-curation-form"
+          >
+            <el-form-item label="标准答案文本 (expected_output)" prop="expected_output">
               <el-input
                 v-model="editForm.expected_output"
                 type="textarea"
@@ -324,7 +365,10 @@ onMounted(() => {
               />
             </el-form-item>
 
-            <el-form-item label="结构化期望目标 JSON (expected_structured_json，可选)">
+            <el-form-item
+              label="结构化期望目标 JSON (expected_structured_json，可选)"
+              prop="expected_structured_text"
+            >
               <el-input
                 v-model="editForm.expected_structured_text"
                 type="textarea"
@@ -335,13 +379,13 @@ onMounted(() => {
             </el-form-item>
 
             <div class="ev-grid-2">
-              <el-form-item label="固定分集归属 (dataset_split)">
+              <el-form-item label="固定分集归属 (dataset_split)" prop="dataset_split">
                 <el-select v-model="editForm.dataset_split" style="width: 100%">
                   <el-option label="DEV 调优集（允许调参与寻优）" value="DEV" />
                   <el-option label="HOLDOUT 留出验真集（最终验收锁定）" value="HOLDOUT" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="样本难度分级">
+              <el-form-item label="样本难度分级" prop="difficulty">
                 <el-select v-model="editForm.difficulty" style="width: 100%">
                   <el-option label="EASY 基础" value="EASY" />
                   <el-option label="NORMAL 常规" value="NORMAL" />
@@ -561,6 +605,14 @@ onMounted(() => {
 .ev-cell-secondary {
   font-size: var(--ev-fs-label);
   color: var(--ev-text-secondary);
+}
+
+.ev-pagination-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px solid var(--ev-border-subtle);
 }
 
 @media (max-width: 1023px) {

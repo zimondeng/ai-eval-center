@@ -195,3 +195,42 @@ export function formatSignedDelta(
   }
   return `${prefix}${num.toFixed(4)}`
 }
+
+export function isPlainJsonObject(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val)
+}
+
+export function validateOptionalJsonObject(
+  _rule: unknown,
+  value: string | null | undefined,
+  callback: (err?: Error) => void,
+): void {
+  const trimmed = (value ?? '').trim()
+  if (!trimmed) {
+    callback()
+    return
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (!isPlainJsonObject(parsed)) {
+      callback(new Error('必须为合法的 JSON 对象（如 {"key": "value"}）'))
+      return
+    }
+    callback()
+  } catch {
+    callback(new Error('JSON 语法格式不合法，请检查括号与引号'))
+  }
+}
+
+export function validateRequiredJsonObject(
+  _rule: unknown,
+  value: string | null | undefined,
+  callback: (err?: Error) => void,
+): void {
+  const trimmed = (value ?? '').trim()
+  if (!trimmed) {
+    callback(new Error('请输入 JSON 对象配置'))
+    return
+  }
+  validateOptionalJsonObject(_rule, trimmed, callback)
+}

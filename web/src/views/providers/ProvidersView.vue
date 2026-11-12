@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import {
   Connection,
   CopyDocument,
@@ -10,7 +10,11 @@ import {
   Setting,
 } from '@element-plus/icons-vue'
 import { adaptersApi, authApi, providersApi } from '@/api/endpoints'
-import { formatReadableError } from '@/api/http'
+import {
+  formatReadableError,
+  validateOptionalJsonObject,
+  validateRequiredJsonObject,
+} from '@/api/http'
 import type {
   AdapterTestResult,
   AdapterType,
@@ -22,6 +26,7 @@ import type {
   ProviderKind,
   ProviderNetworkMode,
   ProviderProbeResult,
+  ProviderUpdatePayload,
   ProviderUpsertPayload,
   SutAdapterRecord,
 } from '@/api/types'
@@ -46,7 +51,8 @@ const fetchedModels = reactive<Record<string, string[]>>({})
 const providerDrawerOpen = ref(false)
 const savingProvider = ref(false)
 const isEditingProvider = ref(false)
-const providerForm = reactive<ProviderUpsertPayload>({
+const providerFormRef = ref<FormInstance>()
+const providerForm = reactive<ProviderUpsertPayload & { extra_options_text: string }>({
   provider_code: '',
   provider_name: '',
   provider_kind: 'OLLAMA_LOCAL',
@@ -64,14 +70,42 @@ const providerForm = reactive<ProviderUpsertPayload>({
   max_options_per_question: 24,
   waf_strip_code_retry: false,
   cost_per_1m_input_tokens: 0,
+  extra_options_text: '{\n  "keep_alive": "15m"\n}',
   is_default: false,
   status: 'ACTIVE',
+})
+
+const providerRules: FormRules = {
+  provider_code: [{ required: true, message: '请输入渠道编码', trigger: 'blur' }],
+  provider_name: [{ required: true, message: '请输入渠道名称', trigger: 'blur' }],
+  provider_kind: [{ required: true, message: '请选择渠道类型', trigger: 'change' }],
+  default_model: [{ required: true, message: '请选择或输入默认判别模型名', trigger: 'change' }],
+  endpoint_url: [{ required: true, message: '请输入决策请求端点 URL', trigger: 'blur' }],
+  max_questions_per_call: [
+    { type: 'number', min: 1, max: 128, message: '合批题数需在 1 ~ 128 之间', trigger: 'change' },
+  ],
+  cost_per_1m_input_tokens: [
+    { type: 'number', min: 0, message: 'Token 成本不能小于 0', trigger: 'change' },
+  ],
+  extra_options_text: [{ validator: validateOptionalJsonObject, trigger: ['blur', 'change'] }],
+}
+
+const availableProviderModels = computed<string[]>(() => {
+  const code = providerForm.provider_code.trim()
+  const remote = code ? (fetchedModels[code] ?? []) : []
+  const out = [...remote]
+  const cur = providerForm.default_model.trim()
+  if (cur && !out.includes(cur)) {
+    out.unshift(cur)
+  }
+  return out
 })
 
 /* ---- Adapter state ---- */
 const adapterFilterLevel = ref<string>('')
 const adapterDrawerOpen = ref(false)
 const savingAdapter = ref(false)
+const adapterFormRef = ref<FormInstance>()
 const adapterForm = reactive<{
   adapter_code: string
   adapter_name: string
@@ -102,11 +136,21 @@ const adapterForm = reactive<{
   description: '',
 })
 
+const adapterRules: FormRules = {
+  adapter_code: [{ required: true, message: '请输入适配器编码', trigger: 'blur' }],
+  adapter_name: [{ required: true, message: '请输入适配器名称', trigger: 'blur' }],
+  endpoint_url: [{ required: true, message: '请输入调用或回放端点 URL', trigger: 'blur' }],
+  auth_json_text: [{ validator: validateOptionalJsonObject, trigger: ['blur', 'change'] }],
+  request_mapping_text: [{ validator: validateRequiredJsonObject, trigger: ['blur', 'change'] }],
+  response_mapping_text: [{ validator: validateRequiredJsonObject, trigger: ['blur', 'change'] }],
+}
+
 const debugDrawerOpen = ref(false)
 const debugTargetAdapter = ref<SutAdapterRecord | null>(null)
 const runningAdapterDebug = ref(false)
 const debugResult = ref<AdapterTestResult | null>(null)
 const debugError = ref<string | null>(null)
+const debugFormRef = ref<FormInstance>()
 const debugForm = reactive({
   input_text: '你好，请介绍常州住房公积金咨询渠道与办理材料。',
   sut_input_text: '{\n  "selected_region": "天宁区"\n}',
@@ -114,17 +158,32 @@ const debugForm = reactive({
   run_overrides_text: '',
 })
 
+const debugRules: FormRules = {
+  input_text: [{ required: true, message: '请输入模拟测试输入文本', trigger: 'blur' }],
+  sut_input_text: [{ validator: validateOptionalJsonObject, trigger: ['blur', 'change'] }],
+  sut_context_text: [{ validator: validateOptionalJsonObject, trigger: ['blur', 'change'] }],
+  run_overrides_text: [{ validator: validateOptionalJsonObject, trigger: ['blur', 'change'] }],
+}
+
 /* ---- API Key state ---- */
 const keyDialogOpen = ref(false)
 const creatingKey = ref(false)
 const revokingKeyId = ref<number | null>(null)
 const revokeConfirmTarget = ref<ApiKeyRecord | null>(null)
 const newlyIssuedPlainKey = ref<string | null>(null)
+const keyFormRef = ref<FormInstance>()
 const keyForm = reactive({
   key_name: '',
   rate_limit_rpm: 300,
   expires_in_days: 90 as number | null,
 })
+
+const keyRules: FormRules = {
+  key_name: [{ required: true, message: '请输入密钥用途名称', trigger: 'blur' }],
+  rate_limit_rpm: [
+    { type: 'number', min: 10, max: 10000, message: 'RPM 限流需在 10 ~ 10000 之间', trigger: 'change' },
+  ],
+}
 
 const filteredProviders = computed(() => {
   if (!providerFilterKind.value) return providers.value
@@ -177,6 +236,7 @@ function applyProviderPreset(kind: ProviderKind): void {
     providerForm.network_mode = 'DIRECT'
     providerForm.waf_strip_code_retry = false
     providerForm.cost_per_1m_input_tokens = 0
+    providerForm.extra_options_text = '{\n  "keep_alive": "15m"\n}'
   } else if (kind === 'DECISION_RELAY') {
     providerForm.endpoint_url = 'https://emrank.tech/v1/decisions'
     providerForm.models_list_url = 'https://emrank.tech/v1/models'
@@ -185,6 +245,7 @@ function applyProviderPreset(kind: ProviderKind): void {
     providerForm.network_mode = 'PROXY_FALLBACK'
     providerForm.waf_strip_code_retry = true
     providerForm.cost_per_1m_input_tokens = 0.2
+    providerForm.extra_options_text = ''
   } else {
     providerForm.endpoint_url = 'https://api.typesafe.ai/v1/systemone'
     providerForm.models_list_url = ''
@@ -193,6 +254,7 @@ function applyProviderPreset(kind: ProviderKind): void {
     providerForm.network_mode = 'PROXY_FALLBACK'
     providerForm.waf_strip_code_retry = true
     providerForm.cost_per_1m_input_tokens = 0.2
+    providerForm.extra_options_text = ''
   }
 }
 
@@ -206,6 +268,7 @@ function openCreateProvider(): void {
   providerForm.status = 'ACTIVE'
   applyProviderPreset('OLLAMA_LOCAL')
   providerDrawerOpen.value = true
+  providerFormRef.value?.clearValidate()
 }
 
 function openEditProvider(row: DecisionProviderRecord): void {
@@ -227,25 +290,62 @@ function openEditProvider(row: DecisionProviderRecord): void {
   providerForm.max_options_per_question = row.max_options_per_question
   providerForm.waf_strip_code_retry = row.waf_strip_code_retry
   providerForm.cost_per_1m_input_tokens = row.cost_per_1m_input_tokens
+  providerForm.extra_options_text = row.extra_options_json
+    ? JSON.stringify(row.extra_options_json, null, 2)
+    : ''
   providerForm.is_default = row.is_default
   providerForm.status = row.status
   providerDrawerOpen.value = true
+  providerFormRef.value?.clearValidate()
 }
 
 async function handleSaveProvider(): Promise<void> {
-  if (!providerForm.provider_code.trim() || !providerForm.provider_name.trim()) {
-    ElMessage.warning('请完整填写渠道编码与渠道名称')
-    return
+  if (providerFormRef.value) {
+    const valid = await providerFormRef.value.validate().catch(() => false)
+    if (!valid) return
   }
+
+  const parsedExtraOptions = providerForm.extra_options_text.trim()
+    ? (JSON.parse(providerForm.extra_options_text) as Record<string, unknown>)
+    : null
+
+  const code = providerForm.provider_code.trim()
+  const basePayload = {
+    provider_name: providerForm.provider_name.trim(),
+    provider_kind: providerForm.provider_kind,
+    endpoint_url: providerForm.endpoint_url.trim(),
+    models_list_url: providerForm.models_list_url?.trim() || null,
+    default_model: providerForm.default_model.trim(),
+    auth_type: providerForm.auth_type,
+    api_key_env_name: providerForm.api_key_env_name?.trim() || null,
+    network_mode: providerForm.network_mode,
+    custom_proxy_url: providerForm.custom_proxy_url?.trim() || null,
+    timeout_seconds: providerForm.timeout_seconds,
+    max_concurrency: providerForm.max_concurrency,
+    max_questions_per_call: providerForm.max_questions_per_call,
+    max_options_per_question: providerForm.max_options_per_question,
+    waf_strip_code_retry: providerForm.waf_strip_code_retry,
+    cost_per_1m_input_tokens: providerForm.cost_per_1m_input_tokens,
+    extra_options_json: parsedExtraOptions,
+    is_default: providerForm.is_default,
+    status: providerForm.status,
+  }
+
   savingProvider.value = true
   try {
-    await providersApi.upsert({
-      ...providerForm,
-      models_list_url: providerForm.models_list_url?.trim() || null,
-      api_key_plain: providerForm.api_key_plain?.trim() || null,
-      api_key_env_name: providerForm.api_key_env_name?.trim() || null,
-      custom_proxy_url: providerForm.custom_proxy_url?.trim() || null,
-    })
+    if (isEditingProvider.value) {
+      const updatePayload: ProviderUpdatePayload = { ...basePayload }
+      if (providerForm.api_key_plain?.trim()) {
+        updatePayload.api_key_plain = providerForm.api_key_plain.trim()
+      }
+      await providersApi.update(code, updatePayload)
+    } else {
+      await providersApi.upsert({
+        provider_code: code,
+        ...basePayload,
+        api_key_plain: providerForm.api_key_plain?.trim() || null,
+      })
+    }
     ElMessage.success('判别模型渠道已保存')
     providerDrawerOpen.value = false
     providers.value = await providersApi.list()
@@ -298,6 +398,7 @@ function openCreateAdapter(): void {
   adapterForm.status = 'ACTIVE'
   adapterForm.description = ''
   adapterDrawerOpen.value = true
+  adapterFormRef.value?.clearValidate()
 }
 
 function openEditAdapter(row: SutAdapterRecord): void {
@@ -317,26 +418,19 @@ function openEditAdapter(row: SutAdapterRecord): void {
   adapterForm.status = row.status
   adapterForm.description = row.description || ''
   adapterDrawerOpen.value = true
+  adapterFormRef.value?.clearValidate()
 }
 
 async function handleSaveAdapter(): Promise<void> {
-  if (!adapterForm.adapter_code.trim() || !adapterForm.adapter_name.trim()) {
-    ElMessage.warning('请填写被测适配器编码与名称')
-    return
+  if (adapterFormRef.value) {
+    const valid = await adapterFormRef.value.validate().catch(() => false)
+    if (!valid) return
   }
-  let authObj: Record<string, unknown> | null = null
-  let reqMap: Record<string, unknown> = {}
-  let respMap: Record<string, unknown> = {}
-  try {
-    if (adapterForm.auth_json_text.trim()) {
-      authObj = JSON.parse(adapterForm.auth_json_text) as Record<string, unknown>
-    }
-    reqMap = JSON.parse(adapterForm.request_mapping_text || '{}') as Record<string, unknown>
-    respMap = JSON.parse(adapterForm.response_mapping_text || '{}') as Record<string, unknown>
-  } catch {
-    ElMessage.error('鉴权或 JSONPath 映射配置不是合法的 JSON 对象')
-    return
-  }
+  const authObj = adapterForm.auth_json_text.trim()
+    ? (JSON.parse(adapterForm.auth_json_text) as Record<string, unknown>)
+    : null
+  const reqMap = JSON.parse(adapterForm.request_mapping_text || '{}') as Record<string, unknown>
+  const respMap = JSON.parse(adapterForm.response_mapping_text || '{}') as Record<string, unknown>
 
   const payload: AdapterUpsertPayload = {
     adapter_code: adapterForm.adapter_code.trim(),
@@ -372,6 +466,7 @@ function openDebugAdapter(row: SutAdapterRecord): void {
   debugResult.value = null
   debugError.value = null
   debugDrawerOpen.value = true
+  debugFormRef.value?.clearValidate()
 }
 
 async function handleRunAdapterTest(): Promise<void> {
@@ -380,23 +475,20 @@ async function handleRunAdapterTest(): Promise<void> {
   debugError.value = null
   debugResult.value = null
 
-  let sutInput: Record<string, unknown> | null = null
-  let sutContext: Record<string, unknown> | null = null
-  let overrides: Record<string, unknown> | null = null
-  try {
-    if (debugForm.sut_input_text.trim()) {
-      sutInput = JSON.parse(debugForm.sut_input_text) as Record<string, unknown>
-    }
-    if (debugForm.sut_context_text.trim()) {
-      sutContext = JSON.parse(debugForm.sut_context_text) as Record<string, unknown>
-    }
-    if (debugForm.run_overrides_text.trim()) {
-      overrides = JSON.parse(debugForm.run_overrides_text) as Record<string, unknown>
-    }
-  } catch {
-    debugError.value = '调试扩展 JSON 格式不合法，请检查语法'
-    return
+  if (debugFormRef.value) {
+    const valid = await debugFormRef.value.validate().catch(() => false)
+    if (!valid) return
   }
+
+  const sutInput = debugForm.sut_input_text.trim()
+    ? (JSON.parse(debugForm.sut_input_text) as Record<string, unknown>)
+    : null
+  const sutContext = debugForm.sut_context_text.trim()
+    ? (JSON.parse(debugForm.sut_context_text) as Record<string, unknown>)
+    : null
+  const overrides = debugForm.run_overrides_text.trim()
+    ? (JSON.parse(debugForm.run_overrides_text) as Record<string, unknown>)
+    : null
 
   runningAdapterDebug.value = true
   try {
@@ -420,12 +512,13 @@ function openIssueKeyDialog(): void {
   keyForm.expires_in_days = 90
   newlyIssuedPlainKey.value = null
   keyDialogOpen.value = true
+  keyFormRef.value?.clearValidate()
 }
 
 async function handleCreateApiKey(): Promise<void> {
-  if (!keyForm.key_name.trim()) {
-    ElMessage.warning('请输入密钥用途名称')
-    return
+  if (keyFormRef.value) {
+    const valid = await keyFormRef.value.validate().catch(() => false)
+    if (!valid) return
   }
   creatingKey.value = true
   try {
@@ -819,50 +912,71 @@ onMounted(() => {
         </el-button>
       </div>
 
-      <el-form label-position="top" class="ev-section-mt">
+      <el-form
+        ref="providerFormRef"
+        :model="providerForm"
+        :rules="providerRules"
+        label-position="top"
+        class="ev-section-mt"
+      >
         <div class="ev-grid-2">
-          <el-form-item label="渠道编码 (provider_code)" required>
+          <el-form-item label="渠道编码 (provider_code)" prop="provider_code" required>
             <el-input
               v-model="providerForm.provider_code"
               :disabled="isEditingProvider"
               placeholder="如 ollama_local_tev1"
             />
           </el-form-item>
-          <el-form-item label="渠道名称" required>
+          <el-form-item label="渠道名称" prop="provider_name" required>
             <el-input v-model="providerForm.provider_name" placeholder="如 本地 Ollama tev1:0.8b" />
           </el-form-item>
         </div>
 
         <div class="ev-grid-2">
-          <el-form-item label="渠道类型 (provider_kind)" required>
+          <el-form-item label="渠道类型 (provider_kind)" prop="provider_kind" required>
             <el-select v-model="providerForm.provider_kind" style="width: 100%">
               <el-option label="OLLAMA_LOCAL (本地决策模型)" value="OLLAMA_LOCAL" />
               <el-option label="DECISION_RELAY (第三方中转)" value="DECISION_RELAY" />
               <el-option label="TYPESAFE_OFFICIAL (官方云端)" value="TYPESAFE_OFFICIAL" />
             </el-select>
           </el-form-item>
-          <el-form-item label="默认锁定模型名 (default_model)" required>
-            <el-input v-model="providerForm.default_model" placeholder="如 tev1:0.8b 或 typesafe/jev-1.14.0" />
+          <el-form-item label="默认锁定模型名 (default_model)" prop="default_model" required>
+            <el-select
+              v-model="providerForm.default_model"
+              data-testid="provider-default-model-select"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="选择已拉取模型或直接输入标识（如 tev1:0.8b）"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="modelId in availableProviderModels"
+                :key="modelId"
+                :label="modelId"
+                :value="modelId"
+              />
+            </el-select>
           </el-form-item>
         </div>
 
-        <el-form-item label="决策请求端点 (endpoint_url)" required>
+        <el-form-item label="决策请求端点 (endpoint_url)" prop="endpoint_url" required>
           <el-input v-model="providerForm.endpoint_url" placeholder="http://127.0.0.1:11434/v1/systemone" />
         </el-form-item>
 
-        <el-form-item label="模型列表端点 (models_list_url，可选)">
+        <el-form-item label="模型列表端点 (models_list_url，可选)" prop="models_list_url">
           <el-input v-model="providerForm.models_list_url" placeholder="https://emrank.tech/v1/models" />
         </el-form-item>
 
         <div class="ev-grid-2">
-          <el-form-item label="鉴权方式">
+          <el-form-item label="鉴权方式" prop="auth_type">
             <el-select v-model="providerForm.auth_type" style="width: 100%">
               <el-option label="NONE (无鉴权)" value="NONE" />
               <el-option label="BEARER (加密存储密钥)" value="BEARER" />
               <el-option label="ENV_REF (读取服务端环境变量)" value="ENV_REF" />
             </el-select>
           </el-form-item>
-          <el-form-item label="网络代理策略">
+          <el-form-item label="网络代理策略" prop="network_mode">
             <el-select v-model="providerForm.network_mode" style="width: 100%">
               <el-option label="DIRECT (强制直连)" value="DIRECT" />
               <el-option label="PROXY_FALLBACK (10808 -> 7897 -> 直连)" value="PROXY_FALLBACK" />
@@ -871,23 +985,35 @@ onMounted(() => {
           </el-form-item>
         </div>
 
-        <el-form-item v-if="providerForm.auth_type === 'BEARER'" label="API Key 明文 (留空则保持已存密文不变)">
+        <el-form-item
+          v-if="providerForm.auth_type === 'BEARER'"
+          label="API Key 明文 (留空则保持已存密文不变)"
+          prop="api_key_plain"
+        >
           <el-input v-model="providerForm.api_key_plain" type="password" show-password placeholder="sk-..." />
         </el-form-item>
 
-        <el-form-item v-if="providerForm.auth_type === 'ENV_REF'" label="服务端环境变量名">
+        <el-form-item
+          v-if="providerForm.auth_type === 'ENV_REF'"
+          label="服务端环境变量名"
+          prop="api_key_env_name"
+        >
           <el-input v-model="providerForm.api_key_env_name" placeholder="如 EMRANK_API_KEY" />
         </el-form-item>
 
-        <el-form-item v-if="providerForm.network_mode === 'CUSTOM_PROXY'" label="自定义代理地址">
+        <el-form-item
+          v-if="providerForm.network_mode === 'CUSTOM_PROXY'"
+          label="自定义代理地址"
+          prop="custom_proxy_url"
+        >
           <el-input v-model="providerForm.custom_proxy_url" placeholder="http://127.0.0.1:10808" />
         </el-form-item>
 
         <div class="ev-grid-2">
-          <el-form-item label="单次合批最大题数">
+          <el-form-item label="单次合批最大题数" prop="max_questions_per_call">
             <el-input-number v-model="providerForm.max_questions_per_call" :min="1" :max="128" />
           </el-form-item>
-          <el-form-item label="每百万输入 Token 成本 (USD)">
+          <el-form-item label="每百万输入 Token 成本 (USD)" prop="cost_per_1m_input_tokens">
             <el-input-number
               v-model="providerForm.cost_per_1m_input_tokens"
               :min="0"
@@ -896,6 +1022,20 @@ onMounted(() => {
             />
           </el-form-item>
         </div>
+
+        <el-form-item
+          label="扩展调用参数 JSON (extra_options_json，如 Ollama keep_alive)"
+          prop="extra_options_text"
+        >
+          <el-input
+            v-model="providerForm.extra_options_text"
+            data-testid="provider-extra-options-input"
+            type="textarea"
+            :rows="3"
+            class="ev-mono"
+            placeholder='{"keep_alive": "15m"}'
+          />
+        </el-form-item>
 
         <div class="ev-switch-row">
           <el-checkbox v-model="providerForm.waf_strip_code_retry">
@@ -908,7 +1048,12 @@ onMounted(() => {
       <template #footer>
         <div class="ev-drawer-footer">
           <el-button @click="providerDrawerOpen = false">取消</el-button>
-          <el-button type="primary" :loading="savingProvider" @click="handleSaveProvider">
+          <el-button
+            data-testid="btn-save-provider"
+            type="primary"
+            :loading="savingProvider"
+            @click="handleSaveProvider"
+          >
             保存判别模型渠道
           </el-button>
         </div>
@@ -917,24 +1062,24 @@ onMounted(() => {
 
     <!-- Adapter Upsert Drawer -->
     <el-drawer v-model="adapterDrawerOpen" title="配置被测适配器" size="640px">
-      <el-form label-position="top">
+      <el-form ref="adapterFormRef" :model="adapterForm" :rules="adapterRules" label-position="top">
         <div class="ev-grid-2">
-          <el-form-item label="适配器编码 (adapter_code)" required>
+          <el-form-item label="适配器编码 (adapter_code)" prop="adapter_code" required>
             <el-input v-model="adapterForm.adapter_code" placeholder="如 gov_e2e_routing_blocking" />
           </el-form-item>
-          <el-form-item label="适配器名称" required>
+          <el-form-item label="适配器名称" prop="adapter_name" required>
             <el-input v-model="adapterForm.adapter_name" placeholder="如 政务智能客服路由总入口" />
           </el-form-item>
         </div>
 
         <div class="ev-grid-2">
-          <el-form-item label="评测层级 (eval_level)">
+          <el-form-item label="评测层级 (eval_level)" prop="eval_level">
             <el-select v-model="adapterForm.eval_level" style="width: 100%">
               <el-option label="E2E 端到端接口" value="E2E" />
               <el-option label="COMPONENT 内部组件回放" value="COMPONENT" />
             </el-select>
           </el-form-item>
-          <el-form-item label="适配器协议类型">
+          <el-form-item label="适配器协议类型" prop="adapter_type">
             <el-select v-model="adapterForm.adapter_type" style="width: 100%">
               <el-option label="HTTP_JSON (阻塞式 JSON)" value="HTTP_JSON" />
               <el-option label="HTTP_SSE (流式采集 TTFT)" value="HTTP_SSE" />
@@ -943,13 +1088,14 @@ onMounted(() => {
           </el-form-item>
         </div>
 
-        <el-form-item label="调用/回放端点 (endpoint_url)" required>
+        <el-form-item label="调用/回放端点 (endpoint_url)" prop="endpoint_url" required>
           <el-input v-model="adapterForm.endpoint_url" />
         </el-form-item>
 
         <el-form-item
           v-if="adapterForm.adapter_type === 'COMPONENT_HARNESS'"
           label="组件快照录制端点 (record_endpoint_url)"
+          prop="record_endpoint_url"
         >
           <el-input
             v-model="adapterForm.record_endpoint_url"
@@ -957,11 +1103,11 @@ onMounted(() => {
           />
         </el-form-item>
 
-        <el-form-item label="鉴权配置 JSON (auth_config_json)">
+        <el-form-item label="鉴权配置 JSON (auth_config_json)" prop="auth_json_text">
           <el-input v-model="adapterForm.auth_json_text" type="textarea" :rows="3" class="ev-mono" />
         </el-form-item>
 
-        <el-form-item label="入参 JSONPath 映射 (request_mapping_json)">
+        <el-form-item label="入参 JSONPath 映射 (request_mapping_json)" prop="request_mapping_text" required>
           <el-input
             v-model="adapterForm.request_mapping_text"
             type="textarea"
@@ -970,7 +1116,7 @@ onMounted(() => {
           />
         </el-form-item>
 
-        <el-form-item label="出参 JSONPath 抽取映射 (response_mapping_json)">
+        <el-form-item label="出参 JSONPath 抽取映射 (response_mapping_json)" prop="response_mapping_text" required>
           <el-input
             v-model="adapterForm.response_mapping_text"
             type="textarea"
@@ -996,15 +1142,15 @@ onMounted(() => {
       :title="`被测适配器映射联调 · ${debugTargetAdapter?.adapter_code || ''}`"
       size="680px"
     >
-      <el-form label-position="top">
-        <el-form-item label="模拟输入文本 (input_text)">
+      <el-form ref="debugFormRef" :model="debugForm" :rules="debugRules" label-position="top">
+        <el-form-item label="模拟输入文本 (input_text)" prop="input_text" required>
           <el-input v-model="debugForm.input_text" type="textarea" :rows="2" />
         </el-form-item>
         <div class="ev-grid-2">
-          <el-form-item label="扩展入参 JSON (sut_input_json)">
+          <el-form-item label="扩展入参 JSON (sut_input_json)" prop="sut_input_text">
             <el-input v-model="debugForm.sut_input_text" type="textarea" :rows="3" class="ev-mono" />
           </el-form-item>
-          <el-form-item label="运行参数覆盖 JSON (run_overrides)">
+          <el-form-item label="运行参数覆盖 JSON (run_overrides)" prop="run_overrides_text">
             <el-input
               v-model="debugForm.run_overrides_text"
               type="textarea"
@@ -1017,6 +1163,7 @@ onMounted(() => {
         <el-form-item
           v-if="debugTargetAdapter?.adapter_type === 'COMPONENT_HARNESS'"
           label="冻结组件快照 JSON (sut_context_json)"
+          prop="sut_context_text"
         >
           <el-input v-model="debugForm.sut_context_text" type="textarea" :rows="3" class="ev-mono" />
         </el-form-item>
@@ -1075,15 +1222,15 @@ onMounted(() => {
         </div>
       </div>
 
-      <el-form v-else label-position="top">
-        <el-form-item label="密钥名称" required>
+      <el-form v-else ref="keyFormRef" :model="keyForm" :rules="keyRules" label-position="top">
+        <el-form-item label="密钥名称" prop="key_name" required>
           <el-input v-model="keyForm.key_name" placeholder="如 GitLab CI 每日门禁流水线" />
         </el-form-item>
         <div class="ev-grid-2">
-          <el-form-item label="每分钟限流 (RPM)">
+          <el-form-item label="每分钟限流 (RPM)" prop="rate_limit_rpm">
             <el-input-number v-model="keyForm.rate_limit_rpm" :min="10" :max="10000" />
           </el-form-item>
-          <el-form-item label="有效天数">
+          <el-form-item label="有效天数" prop="expires_in_days">
             <el-input-number v-model="keyForm.expires_in_days" :min="1" :max="3650" />
           </el-form-item>
         </div>

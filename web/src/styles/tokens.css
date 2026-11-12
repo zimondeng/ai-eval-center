@@ -1,0 +1,129 @@
+:root {
+  /* Surface & Canvas (DESIGN.md §4 & §5) */
+  --ev-bg-page: #F4F6F9;
+  --ev-bg-card: #FFFFFF;
+  --ev-bg-panel: #F8FAFC;
+
+  /* Primary Calibration Blue */
+  --ev-color-primary: #1D4ED8;
+  --ev-color-primary-hover: #1E40AF;
+  --ev-color-primary-active: #1E3A8A;
+  --ev-color-primary-subtle: #EFF6FF;
+  --ev-color-primary-border: #BFDBFE;
+
+  /* Typography Hierarchy */
+  --ev-text-primary: #0F172A;
+  --ev-text-secondary: #475569;
+  --ev-text-tertiary: #64748B;
+  --ev-text-inverse: #FFFFFF;
+
+  /* Borders */
+  --ev-border-subtle: #E2E8F0;
+  --ev-border-strong: #CBD5E1;
+
+  /* Semantic Status Colors (WCAG 2.1 AA >= 4.5:1) */
+  --ev-color-success: #15803D;
+  --ev-color-success-subtle: #F0FDF4;
+  --ev-color-success-border: #BBF7D0;
+  --ev-color-success-solid: #16A34A;
+
+  --ev-color-warning: #B45309;
+  --ev-color-warning-subtle: #FFFBEB;
+  --ev-color-warning-border: #FDE68A;
+  --ev-color-warning-solid: #D97706;
+
+  --ev-color-danger: #B91C1C;
+  --ev-color-danger-subtle: #FEF2F2;
+  --ev-color-danger-border: #FECACA;
+  --ev-color-danger-solid: #DC2626;
+
+  --ev-color-neutral: #475569;
+  --ev-color-neutral-subtle: #F1F5F9;
+  --ev-color-neutral-border: #CBD5E1;
+
+  /* Dataset Split Hard-Isolation Tokens (DESIGN.md §4 Rule 3 & §5) */
+  --ev-color-split-dev: #0369A1;
+  --ev-color-split-dev-subtle: #F0F9FF;
+  --ev-color-split-dev-border: #BAE6FD;
+
+  --ev-color-split-holdout: #0F766E;
+  --ev-color-split-holdout-subtle: #F0FDFA;
+  --ev-color-split-holdout-border: #99F6E4;
+
+  /* Typography Stacks & Scale (DESIGN.md §6 - fixed rem, no clamp) */
+  --ev-font-sans: Inter, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --ev-font-mono: 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Consolas, ui-monospace, monospace;
+
+  --ev-fs-headline: 1.25rem;
+  --ev-fs-title: 1rem;
+  --ev-fs-kpi: 1.625rem;
+  --ev-fs-body: 0.875rem;
+  --ev-fs-mono: 0.8125rem;
+  --ev-fs-label: 0.75rem;
+
+  /* Radii & Spacing */
+  --ev-radius-sm: 4px;
+  --ev-radius-md: 6px;
+  --ev-radius-lg: 8px;
+
+  --ev-space-xs: 4px;
+  --ev-space-sm: 8px;
+  --ev-space-md: 12px;
+  --ev-space-lg: 16px;
+  --ev-space-xl: 24px;
+
+  /* Elevation & Motion (DESIGN.md §4 Rule 2 & §13.2) */
+  --ev-shadow-overlay: 0 8px 24px -4px rgba(15, 23, 42, 0.12), 0 2px 6px -1px rgba(15, 23, 42, 0.06);
+  --ev-shadow-hover: 0 2px 6px 0 rgba(15, 23, 42, 0.05);
+  --ev-ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ev-duration-enter: 200ms;
+  --ev-duration-exit: 150ms;
+
+  /* Element Plus Global Variable Overrides (DESIGN.md §5 & tech_notes.md §6) */
+  --el-color-primary: #1D4ED8;
+  --el-color-primary-light-3: #3B82F6;
+  --el-color-primary-light-5: #60A5FA;
+  --el-color-primary-light-7: #93C5FD;
+  --el-color-primary-light-8: #BFDBFE;
+  --el-color-primary-light-9: #EFF6FF;
+  --el-color-primary-dark-2: #1E40AF;
+
+  --el-color-success: #15803D;
+  --el-color-success-light-8: #DCFCE7;
+  --el-color-success-light-9: #F0FDF4;
+
+  --el-color-warning: #B45309;
+  --el-color-warning-light-8: #FEF3C7;
+  --el-color-warning-light-9: #FFFBEB;
+
+  --el-color-danger: #DC2626;
+  --el-color-danger-light-8: #FEE2E2;
+  --el-color-danger-light-9: #FEF2F2;
+  --el-color-error: #DC2626;
+
+  --el-color-info: #475569;
+  --el-color-info-light-9: #F1F5F9;
+
+  --el-text-color-primary: #0F172A;
+  --el-text-color-regular: #0F172A;
+  --el-text-color-secondary: #475569;
+  --el-text-color-placeholder: #64748B;
+
+  --el-border-color: #CBD5E1;
+  --el-border-color-light: #E2E8F0;
+  --el-border-color-lighter: #E2E8F0;
+  --el-border-color-extra-light: #F1F5F9;
+
+  --el-bg-color: #FFFFFF;
+  --el-bg-color-page: #F4F6F9;
+  --el-bg-color-overlay: #FFFFFF;
+  --el-fill-color-light: #F8FAFC;
+  --el-fill-color-lighter: #F8FAFC;
+  --el-fill-color-blank: #FFFFFF;
+
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-font-family: var(--ev-font-sans);
+  --el-font-size-base: 14px;
+  --el-font-size-small: 12px;
+}

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Local test / runtime databases & env
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+
+# Node / Frontend
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# OS / IDE
+.DS_Store
+Thumbs.db

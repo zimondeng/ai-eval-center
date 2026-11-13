@@ -9,6 +9,8 @@
 - [docs/02-architecture-and-design.md](./docs/02-architecture-and-design.md)：系统架构与核心内核详细设计（System One 三端协议、多题合批、静态 Linter、SUT 适配器与概率账本重算）
 - [docs/03-database-design.md](./docs/03-database-design.md)：`kd_eval` 业务无关通用数据库 ER 模型与表结构说明
 - [docs/04-api-specification.md](./docs/04-api-specification.md)：RESTful API 完整接口规格文档（含外部配套被测组件回放 Harness 协议契约）
+- [docs/05-user-manual-and-guide.md](./docs/05-user-manual-and-guide.md)：产品功能介绍与全流程操作手册
 - [docs/sql/01_schema.sql](./docs/sql/01_schema.sql)：MySQL 8.0 建库与 11 张核心表完整 DDL
 - [docs/sql/02_seed_defaults.sql](./docs/sql/02_seed_defaults.sql)：预置三类判别模型渠道、政务 E2E/Component 被测适配器与默认评价维度/套件初始化脚本
+- [docs/sql/03_demo_snapshot.sql](./docs/sql/03_demo_snapshot.sql)：脱敏全量演示数据 SQL 快照（覆盖 11 张核心表、演示语料、历史 Run 与原始概率账本）
 - [docs/adr/](./docs/adr/)：关键架构决策记录（ADR）
